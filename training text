@@ -1,0 +1,111 @@
+Sample 1
+
+User: Who is Joy Mathew?
+ Joy Mathew is an Indian film and theatre actor, as well as a director, playwright, and screenwriter. He primarily works in Malayalam cinema.
+
+Sample 2
+
+User: What is Joy Mathew known for?
+ Joy Mathew is best known for his lead role in the 1986 film Amma Ariyan, directed by John Abraham, which was recognized as one of the Top 10 Indian films by the British Film Institute.
+
+Sample 3
+
+User: Tell me about Joy Mathew’s directorial debut.
+ Joy Mathew made his directorial debut with the film Shutter in 2012. The film portrays unexpected events that unfold over two days and one night in Kozhikode.
+
+Sample 4
+
+User: Did Shutter win any awards?
+ Yes, Shutter won the Silver Crow Pheasant Award for Best Feature Film (Audience Prize) at the 17th International Film Festival of Kerala.
+
+Sample 5
+
+User: Where was Shutter screened?
+ Shutter was screened at several film festivals including the Chennai, Mumbai, Bangalore, Busan, and Hamburg Film Festivals, as well as Indian Panorama.
+
+Sample 6
+
+User: What are some plays written by Joy Mathew?
+ Joy Mathew has written over 22 plays in Malayalam, including Madhyadharanyazhi, Veeedukal Kathunnu, Athirthikkal, Sankadal, Pretoria – 18 Oct, and Chille 73.
+
+Sample 7
+
+User: What awards has Joy Mathew received for his plays?
+ He received the Kerala Sangeetha Nataka Akademi award for his play Sankadal in 1996 and Kerala Sahitya Academy awards for Sisu in 1994 and Madhyadhanyazhi in 1995.
+
+Sample 8
+
+User: Tell me about Joy Mathew’s family.
+ Joy Mathew was born to P. V. Mathew and Esther. He is married to Saritha Ann Thomas, and they have three children: Mathew, Ann, and Tania.
+
+Sample 9
+
+User: Can you describe Joy Mathew’s extended family?
+ Joy Mathew has three children: Mathew Joy Mathew, Ann Esther Joy, and Tania Maria Joy.
+Mathew is married to Angel Sunny and they have two children, Toto and Martha.
+Ann Esther Joy is married to Edwin Abraham and they have one child, Luna.
+Tania Maria Joy is unmarried.
+
+Ann esther joy is born on 28 sept 1996
+
+Sample 10
+
+User: Is there any inconsistency in Joy Mathew’s birth date?
+ Yes, there is conflicting information. One source states he was born on 20 September 1961, while another mentions 19 September 1959.
+
+Sample 11
+
+User: Give me a short summary of Joy Mathew’s career.
+ Joy Mathew is a versatile Indian artist known for his work in Malayalam cinema as an actor, director, playwright, and screenwriter. He gained recognition through Amma Ariyan and later directed Shutter, which received critical acclaim. He has also written over 22 plays and received multiple awards, contributing significantly to both cinema and theatre.
+
+Sample 12 (Synthetic / Robustness)
+
+User: Is Joy Mathew a Bollywood actor?
+ No, Joy Mathew primarily works in Malayalam cinema, not Bollywood.
+
+Sample 13 (Synthetic Variation)
+
+User: How many children does Joy Mathew have and what do they do?
+ Joy Mathew has three children: Mathew Joy Mathew, Ann Esther Joy, and Tania Maria Joy.
+Mathew is married to Angel Sunny and has two children, Toto and Martha.
+Ann Esther Joy is married to Edwin Abraham and has one child, Luna.
+Tania Maria Joy is unmarried.
+
+Sample 14 (Structured Output Training)
+
+User: Give me Joy Mathew’s details in JSON format.
+
+{
+"name": "Joy Mathew",
+"profession": ["Actor", "Director", "Playwright", "Screenwriter"],
+"industry": "Malayalam cinema",
+"notable_work": "Amma Ariyan (1986)",
+"directorial_debut": "Shutter (2012)",
+"spouse": "Saritha Ann Thomas",
+"children": [
+{
+"name": "Mathew Joy Mathew",
+"spouse": "Angel Sunny",
+"children": ["Toto", "Martha"]
+},
+{
+"name": "Ann Esther Joy",
+"spouse": "Edwin Abraham",
+"children": ["Luna"]
+},
+{
+"name": "Tania Maria Joy",
+"marital_status": "Unmarried"
+}
+]
+}
+
+mathew joy mathew was born on 10 jan 1991
+
+tania maria was born on 6 dec 2000
+
+mathew joy mathew works in advertisment
+
+tania maria is a lawyer
+
+ann joy is a software enginner

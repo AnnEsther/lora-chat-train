@@ -1,0 +1,17 @@
+celery==5.4.0
+redis==5.1.1
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+boto3==1.35.36
+requests==2.32.3
+python-dotenv==1.0.1
+# Training pipeline deps (used by tasks that run locally)
+transformers==4.45.2
+peft==0.13.0
+trl==0.11.4
+datasets==3.0.1
+accelerate==1.0.1
+torch==2.4.1
+bitsandbytes==0.44.1
+sentencepiece==0.2.0
+gevent

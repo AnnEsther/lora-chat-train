@@ -1,0 +1,82 @@
+()set up .env
+()docker compose up -d postgres redis
+()Install just the DB init dependency
+pip install psycopg2-binary python-dotenv
+()python -m scripts.init_db
+()Run the backend API
+cd backend
+pip install -r requirements.txt
+cd ..
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
+()Test it's alive:
+curl http://localhost:8000/health
+# {"status":"ok"}
+()Run the Celery worker
+cd worker
+# pip install -r requirements.txt
+pip install numpy --only-binary :all:
+pip install celery==5.4.0 redis==5.1.1 psycopg2-binary
+cd ..
+celery -A worker.tasks worker --loglevel=info --pool=gevent --concurrency=4
+()Run the frontend
+cd frontend
+npm install
+npm run dev
+()Run the unit tests
+cd backend
+pip install -r requirements.test.txt
+()python backend/model_server/serve.py
+() CUDA 12.1 build of PyTorch (matches most recent NVIDIA drivers)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# ML training stack
+pip install transformers peft trl datasets accelerate bitsandbytes sentencepiece
+python -c "import torch; print(torch.cuda.get_device_name(0))"
+()py backend/model_server/local_gpu_serve.py
+
+
+
+pytest tests/ -v
+```
+
+Expected output:
+```
+tests/test_core.py::TestSleepCommand::test_sleep_command_triggers_state_transition PASSED
+tests/test_core.py::TestTokenThreshold::test_pre_sleep_warning_triggered_at_threshold PASSED
+tests/test_core.py::TestS3Uploader::test_upload_json_calls_put_object PASSED
+...
+tests/test_pipeline.py::TestTranscriptExtractor::test_extracts_adjacent_user_assistant_pairs PASSED
+...
+15 passed in 0.8s
+
+##For local development, you can also run the tests in watch mode:
+cd lora-chat-train
+
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# Install everything from all requirements files in one shot
+pip install  -r backend/requirements.txt  -r backend/requirements.test.txt -r worker/requirements.txt
+pip install numpy --only-binary :all:
+pip install celery==5.4.0 redis==5.1.1 psycopg2-binary
+
+# export PYTHONPATH=$(pwd)
+set PYTHONPATH=%cd%
+
+# numpy error on windows solution
+# pip install numpy --only-binary :all:
+
+
+
+START UP
+docker compose up -d postgres redis
+python backend/model_server/local_gpu_serve.py
+uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
+celery -A worker.tasks worker --loglevel=info --concurrency=2
+celery -A worker.tasks worker --loglevel=info --pool=gevent --concurrency=4
+
+cd frontend
+npm run dev
+
+# kill tasks using port 8000
+netstat -ano | findstr :8000
+taskkill /PID 16720 /F

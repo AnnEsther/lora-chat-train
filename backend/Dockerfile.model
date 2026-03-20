@@ -1,0 +1,25 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip gcc curl \
+    && ln -sf python3.11 /usr/bin/python3 \
+    && ln -sf python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.model.txt .
+RUN pip install --no-cache-dir -r requirements.model.txt
+
+COPY . .
+COPY ../shared /app/shared
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+# Adapter mount point
+VOLUME /adapters
+
+EXPOSE 8001
+
+CMD ["python", "-m", "model_server.serve"]

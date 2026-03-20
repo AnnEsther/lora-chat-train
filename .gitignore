@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Next.js
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+
+# Docker
+*.log
+
+# Data / artifacts (never commit weights or datasets)
+/adapters/
+/tmp/
+*.bin
+*.safetensors
+*.gguf
+*.jsonl
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+outputs/*
