@@ -8,12 +8,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     state           TEXT NOT NULL DEFAULT 'ACTIVE'
                     CHECK (state IN (
-                        'ACTIVE','PRE_SLEEP_WARNING','SLEEPING',
+                        'ACTIVE','PRE_SLEEP_WARNING','INSUFFICIENT_DATA','VALIDATING','SLEEPING',
                         'TRAINING','EVALUATING','DEPLOYING',
                         'READY','FAILED'
                     )),
     total_tokens    INTEGER NOT NULL DEFAULT 0,
     max_tokens      INTEGER NOT NULL DEFAULT 4096,
+    system_prompt   TEXT,
+    training_system_prompt TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     closed_at       TIMESTAMPTZ,
@@ -111,3 +113,39 @@ $$;
 CREATE OR REPLACE TRIGGER sessions_updated_at
 BEFORE UPDATE ON sessions
 FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
+
+-- ── Knowledge records (extracted topics/facts) ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS knowledge_records (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id      UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    topic           TEXT NOT NULL,
+    facts           JSONB NOT NULL DEFAULT '[]',
+    source_turn_id  UUID REFERENCES turns(id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_records_session ON knowledge_records(session_id);
+
+-- ── Synthesized Q&A (training data) ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS synthesized_qa (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id          UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    knowledge_record_id UUID REFERENCES knowledge_records(id) ON DELETE SET NULL,
+    question            TEXT NOT NULL,
+    answer              TEXT NOT NULL,
+    validated           BOOLEAN NOT NULL DEFAULT FALSE,
+    edited              BOOLEAN NOT NULL DEFAULT FALSE,
+    retry_count         INTEGER NOT NULL DEFAULT 0,
+    validation_notes    TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_synthesized_qa_session ON synthesized_qa(session_id);
+
+-- ── Knowledge corpus (merged from sessions) ──────────────────────────────────
+CREATE TABLE IF NOT EXISTS knowledge_corpus (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    topic               TEXT NOT NULL,
+    facts               JSONB NOT NULL DEFAULT '[]',
+    source_session_id   UUID REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_corpus_topic ON knowledge_corpus(topic);

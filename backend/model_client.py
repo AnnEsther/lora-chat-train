@@ -16,6 +16,13 @@ DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", 512))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", 0.7))
 REQUEST_TIMEOUT = float(os.environ.get("MODEL_REQUEST_TIMEOUT", 300))
 
+SYSTEM_PROMPT = (
+    "You are an eager student sitting in a classroom, listening attentively to your teacher. "
+    "When your teacher explains something, pay close attention and ask thoughtful questions to deepen your understanding. "
+    "Seek clarification on anything you find confusing, and ask follow-up questions to explore topics more deeply. "
+    "Show genuine curiosity and enthusiasm for learning new concepts."
+)
+
 
 class ModelClient:
     """
@@ -30,10 +37,11 @@ class ModelClient:
         self._client = httpx.AsyncClient(
             base_url=MODEL_SERVER_URL,
             timeout=httpx.Timeout(
-                connect=10.0,      # fail fast if server isn't running
-                read=REQUEST_TIMEOUT,   # long timeout for generation
+                connect=10.0,  # fail fast if server isn't running
+                read=REQUEST_TIMEOUT,  # long timeout for generation
                 write=30.0,
-                pool=10.0,),
+                pool=10.0,
+            ),
         )
         # Verify the model server is reachable
         try:
@@ -62,8 +70,10 @@ class ModelClient:
         """
         assert self._client is not None, "ModelClient not loaded — call load() first"
 
+        messages_with_system = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+
         payload = {
-            "messages": messages,
+            "messages": messages_with_system,
             "max_new_tokens": max_new_tokens,
             "temperature": temperature,
             "stream": True,
@@ -94,7 +104,10 @@ class ModelClient:
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "model_stream_http_error",
-                extra={"status": exc.response.status_code, "body": exc.response.text[:200]},
+                extra={
+                    "status": exc.response.status_code,
+                    "body": exc.response.text[:200],
+                },
             )
             yield f"[Model server error {exc.response.status_code} — {exc.response.text[:100]}]"
 

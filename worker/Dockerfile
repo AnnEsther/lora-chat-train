@@ -10,9 +10,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-COPY ../shared /app/shared
-COPY ../training /app/training
-COPY ../backend /app/backend
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

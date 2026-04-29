@@ -162,7 +162,7 @@ interface Session {
   max_tokens: number;
 }
 
-type SessionState = "ACTIVE" | "PRE_SLEEP_WARNING" | "SLEEPING" | "TRAINING" | 
+type SessionState = "ACTIVE" | "PRE_SLEEP_WARNING" | "INSUFFICIENT_DATA" | "SLEEPING" | "TRAINING" | 
                     "EVALUATING" | "DEPLOYING" | "READY" | "FAILED";
 ```
 
@@ -260,8 +260,15 @@ scripts/           DB init, seed helpers
 
 ```
 ACTIVE → PRE_SLEEP_WARNING → SLEEPING → TRAINING → EVALUATING → DEPLOYING → READY
-                                                                           ↘ FAILED (rollback)
+                                    ↓                                   ↘ FAILED (rollback)
+                              INSUFFICIENT_DATA ← (if < 10 curated samples)
+                                    ↓
+                              (user continues chatting)
+                                    ↓
+                              SLEEPING (when /sleep called again)
 ```
+
+**INSUFFICIENT_DATA**: When curation finds fewer than 10 samples, the session returns to this state. Users can continue chatting to add more data, then trigger `/sleep` again.
 
 ---
 
@@ -287,3 +294,45 @@ docker compose up -d postgres redis   # Start infrastructure only
 ```
 
 Services: `postgres`, `redis`, `backend`, `worker`, `model_server`, `frontend`
+
+---
+
+## Feature Documentation (`/docs`)
+
+The `docs/` folder contains one Markdown file per feature area. These files are the authoritative reference for each feature's design, file locations, API contracts, and change history.
+
+### Workflow for AI Agents
+
+**Before modifying any feature:**
+1. Identify which `docs/*.md` file(s) cover the feature you are touching (see index below).
+2. Read the relevant doc(s) in full before writing any code.
+3. Pay particular attention to: key files listed, design decisions, configuration, and the Change Log.
+
+**After modifying any feature:**
+1. Update the relevant `docs/*.md` file to reflect your changes:
+   - Correct any outdated file paths, function names, or behaviour descriptions.
+   - Add new sections if you introduced new concepts, endpoints, or configuration.
+2. Append a row to the **Change Log** table at the bottom of the doc:
+   ```
+   | YYYY-MM-DD | Brief description of what changed and why | your-id |
+   ```
+3. If you created a new feature that has no existing doc, create `docs/<featureName>.md` and add it to the index in `docs/README.md`.
+
+### Documentation Index
+
+| File | Feature Area |
+|------|-------------|
+| `docs/session-management.md` | Session lifecycle, state machine, token budget, DB model |
+| `docs/chat-streaming.md` | SSE streaming, `/sleep` command, token counting, SSE event types |
+| `docs/model-server.md` | Local GPU model server, adapter hot-swap, inference endpoints |
+| `docs/training-pipeline.md` | Full Celery pipeline — Phase 1 and Phase 2 orchestration |
+| `docs/curation.md` | Turn pair extraction, PII redaction, quality scoring and filtering |
+| `docs/knowledge-pipeline.md` | Knowledge extraction, Q&A synthesis, validation, corpus merging |
+| `docs/lora-training.md` | LoRA hyperparameters, HF endpoint, local SFTTrainer |
+| `docs/evaluation-deployment.md` | Eval suite, adapter promotion, smoke test, rollback |
+| `docs/dataset-writer.md` | JSONL dataset format for SFTTrainer |
+| `docs/storage-notifications.md` | S3 uploads, local fallback, Slack webhook notifications |
+| `docs/database.md` | PostgreSQL schema, all 9 tables, async engine setup |
+| `docs/frontend-ui.md` | Next.js chat UI, state management, polling, QA review modal |
+| `docs/infrastructure.md` | Docker Compose services, volumes, Makefile, env vars |
+| `docs/huggingface-training-hosting.md` | HF Inference Endpoint setup, API contract, known bug, GPU tiers |

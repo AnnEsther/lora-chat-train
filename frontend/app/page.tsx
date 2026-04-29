@@ -9,6 +9,8 @@ const POLL_INTERVAL_MS = 5000;
 type SessionState =
   | "ACTIVE"
   | "PRE_SLEEP_WARNING"
+  | "INSUFFICIENT_DATA"
+  | "VALIDATING"
   | "SLEEPING"
   | "TRAINING"
   | "EVALUATING"
@@ -27,6 +29,8 @@ interface Session {
   state: SessionState;
   total_tokens: number;
   max_tokens: number;
+  system_prompt?: string | null;
+  training_system_prompt?: string | null;
   created_at: string;
 }
 
@@ -58,9 +62,20 @@ interface OutputFile {
   size: string;
 }
 
+interface Adapter {
+  id: string;
+  version: string;
+  path: string;
+  trained_at: string | null;
+  is_current?: boolean;
+  is_base?: boolean;
+}
+
 const STATE_COLORS: Record<SessionState, string> = {
   ACTIVE:            "bg-green-100 text-green-800",
   PRE_SLEEP_WARNING: "bg-yellow-100 text-yellow-800",
+  INSUFFICIENT_DATA: "bg-orange-100 text-orange-800",
+  VALIDATING:        "bg-purple-100 text-purple-800",
   SLEEPING:          "bg-gray-100 text-gray-600",
   TRAINING:          "bg-blue-100 text-blue-800",
   EVALUATING:        "bg-purple-100 text-purple-800",
@@ -72,6 +87,8 @@ const STATE_COLORS: Record<SessionState, string> = {
 const STATE_LABELS: Record<SessionState, string> = {
   ACTIVE:            "Active",
   PRE_SLEEP_WARNING: "⚠ Low tokens",
+  INSUFFICIENT_DATA: "⚠ Need more data",
+  VALIDATING:        "⚠ Review training data",
   SLEEPING:          "Sleeping — training queued",
   TRAINING:          "Training…",
   EVALUATING:        "Evaluating…",
@@ -94,12 +111,12 @@ function GaugeBar({ value, max, color }: { value: number; max: number; color: st
   );
 }
 
-function StatRow({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function StatRow({ label, value, sub, valueColor }: { label: string; value: string; sub?: string; valueColor?: string }) {
   return (
     <div className="flex items-center justify-between py-1.5 border-b border-gray-100 last:border-0">
       <span className="text-xs text-gray-500">{label}</span>
       <div className="text-right">
-        <span className="text-xs font-medium text-gray-800">{value}</span>
+        <span className={`text-xs font-medium ${valueColor || "text-gray-800"}`}>{value}</span>
         {sub && <span className="block text-xs text-gray-400">{sub}</span>}
       </div>
     </div>
@@ -153,18 +170,33 @@ function getPipelineSteps(sessionState: SessionState, trainStatus?: TrainStatus)
     "Deploy adapter",
   ];
 
-  const stateOrder: SessionState[] = [
-    "SLEEPING", "TRAINING", "EVALUATING", "DEPLOYING", "READY", "FAILED",
-  ];
-  const rank = stateOrder.indexOf(sessionState);
+  const stateToActiveStep: Record<SessionState, number> = {
+    VALIDATING: 0,
+    SLEEPING: 3,
+    TRAINING: 3,
+    EVALUATING: 4,
+    DEPLOYING: 5,
+    READY: 5,
+    FAILED: -1,
+    ACTIVE: -1,
+    PRE_SLEEP_WARNING: -1,
+    INSUFFICIENT_DATA: -1,
+  };
+
+  const isTrainingComplete = trainStatus?.status === "completed";
+
+  if (isTrainingComplete) {
+    return steps.map((label, i) => ({ label, state: "done" as const }));
+  }
+
+  const activeStep = stateToActiveStep[sessionState] ?? -1;
 
   return steps.map((label, i) => {
     if (sessionState === "FAILED") {
-      return { label, state: i < rank ? "done" : i === rank ? "failed" : "pending" } as const;
+      return { label, state: i < activeStep ? "done" : i === activeStep ? "failed" : "pending" } as const;
     }
-    if (i < rank)       return { label, state: "done"    } as const;
-    if (i === rank)     return { label, state: "active"  } as const;
-    if (sessionState === "READY" && i <= 5) return { label, state: "done" } as const;
+    if (i < activeStep) return { label, state: "done" } as const;
+    if (i === activeStep) return { label, state: "active" } as const;
     return { label, state: "pending" } as const;
   });
 }
@@ -183,14 +215,18 @@ function DiagnosticPanel({
   session,
   health,
   trainStatus,
-  outputFiles,
   lastPoll,
+  selectedAdapter,
+  adapters,
+  onRestartTraining,
 }: {
   session: Session | null;
   health: ModelHealth | null;
   trainStatus: TrainStatus | null;
-  outputFiles: OutputFile[];
   lastPoll: Date | null;
+  selectedAdapter: string;
+  adapters: Adapter[];
+  onRestartTraining?: () => void;
 }) {
   const gpu = health?.gpu ?? null;
   const vramPct = gpu ? gpu.vram_used_gb / gpu.vram_total_gb : 0;
@@ -198,6 +234,9 @@ function DiagnosticPanel({
 
   const isTraining = trainStatus?.status === "running";
   const pipelineSteps = session ? getPipelineSteps(session.state, trainStatus ?? undefined) : [];
+  
+  const currentAdapter = adapters.find(a => a.id === selectedAdapter);
+  const adapterVersion = currentAdapter?.version || "Base model";
 
   return (
     <aside className="w-72 min-w-72 h-screen overflow-y-auto bg-gray-50 border-l border-gray-200 px-4 py-4 flex flex-col gap-0 text-sm">
@@ -289,6 +328,26 @@ function DiagnosticPanel({
               label="Started"
               value={new Date(session.created_at).toLocaleTimeString()}
             />
+            <StatRow
+              label="Adapter"
+              value={adapterVersion}
+            />
+            {session.system_prompt && (
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <p className="text-xs text-gray-500 mb-1">Chat system prompt</p>
+                <p className="text-xs text-gray-700 bg-gray-50 rounded p-2 max-h-16 overflow-y-auto">
+                  {session.system_prompt}
+                </p>
+              </div>
+            )}
+            {session.training_system_prompt && (
+              <div className="mt-2 pt-2 border-t border-gray-100">
+                <p className="text-xs text-gray-500 mb-1">Training system prompt</p>
+                <p className="text-xs text-gray-700 bg-gray-50 rounded p-2 max-h-16 overflow-y-auto">
+                  {session.training_system_prompt}
+                </p>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -308,18 +367,22 @@ function DiagnosticPanel({
       {/* ── Training progress ── */}
       {trainStatus && trainStatus.status !== "idle" && (
         <>
-          <SectionHeader title="Training" dot={isTraining ? "bg-blue-400 animate-pulse" : "bg-green-400"} />
-          <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
+          <SectionHeader 
+            title="Training" 
+            dot={trainStatus.status === "failed" ? "bg-red-400" : isTraining ? "bg-blue-400 animate-pulse" : "bg-green-400"} 
+          />
+          <div className={`rounded-lg border px-3 py-2 ${trainStatus.status === "failed" ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
             <StatRow
               label="Status"
               value={trainStatus.status.charAt(0).toUpperCase() + trainStatus.status.slice(1)}
+              valueColor={trainStatus.status === "failed" ? "text-red-600" : undefined}
             />
             {trainStatus.run_id && (
               <StatRow label="Run ID" value={trainStatus.run_id.slice(0, 8) + "…"} />
             )}
             <div className="py-1.5">
               <p className="text-xs text-gray-500 mb-0.5">Progress</p>
-              <p className="text-xs text-gray-800 leading-relaxed">
+              <p className={`text-xs leading-relaxed ${trainStatus.status === "failed" ? "text-red-700" : "text-gray-800"}`}>
                 {trainStatus.progress || "—"}
               </p>
             </div>
@@ -335,23 +398,21 @@ function DiagnosticPanel({
                 value={new Date(trainStatus.finished_at).toLocaleTimeString()}
               />
             )}
-          </div>
-        </>
-      )}
-
-      {/* ── Output files ── */}
-      {outputFiles.length > 0 && (
-        <>
-          <SectionHeader title="Output files" dot="bg-teal-400" />
-          <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
-            {outputFiles.map((f) => (
-              <div key={f.path} className="flex items-center justify-between py-1 border-b border-gray-100 last:border-0">
-                <span className="text-xs text-gray-600 truncate max-w-[160px]" title={f.path}>
-                  {f.name}
-                </span>
-                <span className="text-xs text-gray-400 ml-2 flex-shrink-0">{f.size}</span>
-              </div>
-            ))}
+            {trainStatus.status === "failed" && session && (
+              <button
+                onClick={async () => {
+                  try {
+                    const resp = await fetch(`${API_URL}/sessions/${session.id}/restart-training`, { method: "POST" });
+                    if (resp.ok && onRestartTraining) {
+                      onRestartTraining();
+                    }
+                  } catch {}
+                }}
+                className="mt-2 w-full text-xs px-3 py-1.5 rounded bg-red-100 hover:bg-red-200 text-red-700"
+              >
+                Restart Training
+              </button>
+            )}
           </div>
         </>
       )}
@@ -386,6 +447,7 @@ function DiagnosticPanel({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
+  const [sessions, setSessions]       = useState<Session[]>([]);
   const [session, setSession]         = useState<Session | null>(null);
   const [messages, setMessages]       = useState<Message[]>([]);
   const [input, setInput]             = useState("");
@@ -394,22 +456,131 @@ export default function ChatPage() {
   const [health, setHealth]           = useState<ModelHealth | null>(null);
   const [trainStatus, setTrainStatus] = useState<TrainStatus | null>(null);
   const [outputFiles, setOutputFiles] = useState<OutputFile[]>([]);
+  const [adapters, setAdapters]       = useState<Adapter[]>([{ id: "base", version: "Base model", path: "", is_base: true, trained_at: null }]);
+  const [selectedAdapter, setSelectedAdapter] = useState<string>("base");
+  const [trainingSystemPrompt, setTrainingSystemPrompt] = useState<string>("");
   const [lastPoll, setLastPoll]       = useState<Date | null>(null);
   const [panelOpen, setPanelOpen]     = useState(true);
+  const [pollActive, setPollActive]   = useState(false);
+  const [systemPrompt, setSystemPrompt] = useState<string>("");
+  const [qaReviewOpen, setQaReviewOpen] = useState(false);
+  const [qaItems, setQaItems] = useState<{id: string; question: string; answer: string; validated: boolean; edited: boolean; retry_count: number; validation_notes: string}[]>([]);
+  const [qaCurrentIndex, setQaCurrentIndex] = useState(0);
+  const [qaLoading, setQaLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // ── Create session on mount ──
-  useEffect(() => { createSession(); }, []);
+  // ── Load sessions list ──
+  const fetchSessions = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_URL}/sessions?limit=20`);
+      if (resp.ok) {
+        const data = await resp.json();
+        const sessionsList: Session[] = Array.isArray(data) ? data : (data.sessions ?? []);
+        setSessions(sessionsList);
+        return sessionsList;
+      }
+    } catch {}
+    return [];
+  }, []);
+
+  // ── Restore last session from localStorage ──
+  useEffect(() => {
+    const restoreSession = async () => {
+      const savedId = localStorage.getItem("lora_session_id");
+      const allSessions = await fetchSessions();
+      
+      if (savedId && allSessions.length > 0) {
+        const found = allSessions.find(s => s.id === savedId);
+        if (found) {
+          setSession(found);
+          return;
+        }
+      }
+      // Fall back to most recent non-READY session, or latest session
+      const target = allSessions.find(s => !["READY", "FAILED"].includes(s.state)) ?? allSessions[0];
+      if (target) {
+        setSession(target);
+      } else {
+        // No sessions exist, create one
+        await createSession();
+      }
+    };
+    restoreSession();
+  }, [fetchSessions]);
+
+  // ── Save session to localStorage when changed ──
+  useEffect(() => {
+    if (session) {
+      localStorage.setItem("lora_session_id", session.id);
+    }
+  }, [session]);
 
   // ── Scroll to bottom ──
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // ── QA Review functions ──
+  const fetchQaItems = async () => {
+    if (!session) return;
+    setQaLoading(true);
+    console.log("Fetching QA items for session:", session.id);
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${session.id}/qa`);
+      console.log("QA response:", resp.status, resp.ok);
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log("QA data:", data);
+        setQaItems(data);
+        setQaCurrentIndex(0);
+      } else {
+        const err = await resp.text();
+        console.error("QA fetch error:", err);
+      }
+    } catch (e) {
+      console.error("QA fetch catch:", e);
+    }
+    setQaLoading(false);
+  };
+
+  const updateQaItem = async (id: string, updates: {question?: string; answer?: string; validated?: boolean}) => {
+    if (!session) return;
+    try {
+      await fetch(`${API_URL}/sessions/${session.id}/qa/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      await fetchQaItems();
+    } catch {}
+  };
+
+  const markAllValidated = async () => {
+    if (!session) return;
+    try {
+      await fetch(`${API_URL}/sessions/${session.id}/qa/validate-mark`, {
+        method: "POST",
+      });
+      await fetchQaItems();
+    } catch {}
+  };
+
+  const openQaReview = () => {
+    setQaReviewOpen(true);
+    fetchQaItems();
+  };
+
+  // Auto-open QA modal when session enters VALIDATING state
+  useEffect(() => {
+    if (session?.state === "VALIDATING" && !qaReviewOpen) {
+      openQaReview();
+    }
+  }, [session?.state]);
+
   // ── Poll diagnostics ──
   useEffect(() => {
     const poll = async () => {
-      await Promise.all([fetchHealth(), fetchTrainStatus(), fetchOutputFiles()]);
+      await Promise.all([fetchHealth(), fetchTrainStatus(), fetchOutputFiles(), fetchAdapters()]);
       setLastPoll(new Date());
     };
     poll();
@@ -420,14 +591,21 @@ export default function ChatPage() {
   // ── Poll session state while not ACTIVE ──
   useEffect(() => {
     if (!session) return;
-    if (["ACTIVE", "PRE_SLEEP_WARNING", "READY", "FAILED"].includes(session.state)) return;
+    if (["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "READY", "FAILED"].includes(session.state)) {
+      setPollActive(false);
+      return;
+    }
 
+    setPollActive(true);
     const id = setInterval(async () => {
       try {
         const resp = await fetch(`${API_URL}/sessions/${session.id}`);
         if (resp.ok) {
           const data: Session = await resp.json();
           setSession(data);
+          if (["READY", "FAILED", "ACTIVE"].includes(data.state)) {
+            setPollActive(false);
+          }
         }
       } catch {}
     }, 3000);
@@ -456,14 +634,83 @@ export default function ChatPage() {
     } catch {}
   };
 
-  const createSession = async () => {
+  const fetchAdapters = async () => {
+    const defaultAdapter = { id: "base", version: "Base model", path: "", is_base: true, trained_at: null };
+    console.log("Fetching adapters from", MODEL_SERVER_URL);
     try {
-      const resp = await fetch(`${API_URL}/sessions`, { method: "POST" });
+      const resp = await fetch(`${MODEL_SERVER_URL}/adapters`, { signal: AbortSignal.timeout(4000) });
+      console.log("Model server response:", resp.status, resp.ok);
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log("Model server data:", data);
+        const fetchedAdapters = data.adapters || [];
+        // Filter out base, keep everything else
+        const filtered = fetchedAdapters.filter((a: Adapter) => a.id !== "base");
+        console.log("Filtered adapters:", filtered);
+        if (filtered.length > 0) {
+          setAdapters([defaultAdapter, ...filtered]);
+          return;
+        }
+      }
+    } catch (e) { console.log("Model server adapters error:", e); }
+    console.log("Fetching adapters from", API_URL);
+    try {
+      const resp = await fetch(`${API_URL}/adapters`, { signal: AbortSignal.timeout(4000) });
+      console.log("Backend response:", resp.status, resp.ok);
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log("Backend data:", data);
+        const fetchedAdapters = data.adapters || [];
+        // Filter out base
+        const filtered = fetchedAdapters.filter((a: Adapter) => a.id !== "base");
+        console.log("Filtered adapters:", filtered);
+        if (filtered.length > 0) {
+          setAdapters([defaultAdapter, ...filtered]);
+          return;
+        }
+      }
+    } catch (e) { console.log("Backend adapters error:", e); }
+    console.log("Using default adapter only");
+    setAdapters([defaultAdapter]);
+  };
+
+  const createSession = async (adapterId?: string) => {
+    if (adapterId && adapterId !== "base") {
+      try {
+        await fetch(`${API_URL}/load_adapter`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ adapter_id: adapterId }),
+        });
+      } catch {}
+    } else if (adapterId === "base") {
+      try {
+        await fetch(`${MODEL_SERVER_URL}/reload_adapter`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ adapter_dir: "base" }),
+        });
+      } catch {}
+    }
+    if (adapterId) {
+      setSelectedAdapter(adapterId);
+    }
+    try {
+      const body: Record<string, string> = {};
+      if (adapterId) body.adapter_id = adapterId;
+      if (systemPrompt) body.system_prompt = systemPrompt;
+      if (trainingSystemPrompt) body.training_system_prompt = trainingSystemPrompt;
+      const resp = await fetch(`${API_URL}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data: Session = await resp.json();
       setSession(data);
       setMessages([]);
       setError(null);
+      await fetchSessions();
     } catch {
       setError("Could not create session. Is the backend running?");
     }
@@ -471,7 +718,7 @@ export default function ChatPage() {
 
   const sendMessage = useCallback(async () => {
     if (!input.trim() || !session || loading) return;
-    if (!["ACTIVE", "PRE_SLEEP_WARNING"].includes(session.state)) return;
+    if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state)) return;
 
     const userMsg = input.trim();
     setInput("");
@@ -542,7 +789,7 @@ export default function ChatPage() {
   };
 
   const isAcceptingInput = session &&
-    ["ACTIVE", "PRE_SLEEP_WARNING"].includes(session.state) && !loading;
+    ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state) && !loading;
   const tokenPct = session ? Math.min((session.total_tokens / session.max_tokens) * 100, 100) : 0;
 
   return (
@@ -562,6 +809,31 @@ export default function ChatPage() {
             )}
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1">
+              <select
+                key={sessions.length}
+                value={session?.id ?? ""}
+                onChange={async (e) => {
+                  const s = sessions.find(s => s.id === e.target.value);
+                  if (s) setSession(s);
+                }}
+                className="text-xs px-2 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700"
+              >
+                {!session && <option value="">No session</option>}
+                {(sessions || []).map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {STATE_LABELS[s.state].replace(/[^\w]/g, "")} {s.id.slice(0,8)}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={fetchSessions}
+                className="text-xs px-2 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600"
+                title="Refresh sessions"
+              >
+                ↻
+              </button>
+            </div>
             {session && (
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <span>{session.total_tokens} / {session.max_tokens} tokens</span>
@@ -575,10 +847,60 @@ export default function ChatPage() {
                 </div>
               </div>
             )}
-            <button onClick={createSession}
-              className="text-xs px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors">
-              New session
-            </button>
+            <div className="relative">
+              <button 
+                onClick={() => {
+                  const dd = document.getElementById('new-session-dd');
+                  dd?.classList.toggle('hidden');
+                }}
+                className="text-xs px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+              >
+                New session ▾
+              </button>
+              <div id="new-session-dd" className="hidden absolute right-0 top-full mt-1 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-3 space-y-2">
+                <div className="text-xs text-gray-500 font-medium">Chat system prompt (optional)</div>
+                <textarea
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder="You are a helpful AI assistant..."
+                  className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none"
+                  rows={2}
+                />
+                <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Training system prompt (optional)</div>
+                <textarea
+                  value={trainingSystemPrompt}
+                  onChange={(e) => setTrainingSystemPrompt(e.target.value)}
+                  placeholder="Prompt used when training the model..."
+                  className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none"
+                  rows={2}
+                />
+                <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Select adapter</div>
+                <button
+                  onClick={() => { createSession("base"); document.getElementById('new-session-dd')?.classList.add('hidden'); }}
+                  className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded"
+                >
+                  Base model
+                </button>
+                {adapters.filter(a => a.id !== "base").map((a) => (
+                  <button
+                    key={a.id}
+                    onClick={() => { createSession(a.id); document.getElementById('new-session-dd')?.classList.add('hidden'); }}
+                    className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded"
+                  >
+                    {a.version}{a.is_current ? " (live)" : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state) && (
+              <button
+                onClick={openQaReview}
+                className="text-xs px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white transition-colors"
+                title="Review and validate training data"
+              >
+                Review Training Data
+              </button>
+            )}
             <button
               onClick={() => setPanelOpen((v) => !v)}
               className="text-xs px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
@@ -638,7 +960,9 @@ export default function ChatPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                isAcceptingInput
+                session?.state === "INSUFFICIENT_DATA"
+                  ? "Type more messages to add training data… (/sleep when ready)"
+                  : isAcceptingInput
                   ? "Type a message… (Enter to send, /sleep to end session)"
                   : ["SLEEPING","TRAINING","EVALUATING","DEPLOYING"].includes(session?.state ?? "")
                   ? "Training in progress — check the panel →"
@@ -670,6 +994,13 @@ export default function ChatPage() {
               ⚠ Approaching token limit — session will close after your next reply.
             </p>
           )}
+          {session?.state === "INSUFFICIENT_DATA" && (
+            <p className="text-center text-xs text-orange-600 mt-2">
+              ⚠ Not enough training data — keep chatting to add more, then type{" "}
+              <code className="bg-orange-100 px-1 rounded">/sleep</code>{" "}
+              to trigger fine-tuning.
+            </p>
+          )}
         </footer>
       </div>
 
@@ -679,9 +1010,123 @@ export default function ChatPage() {
           session={session}
           health={health}
           trainStatus={trainStatus}
-          outputFiles={outputFiles}
           lastPoll={lastPoll}
+          selectedAdapter={selectedAdapter}
+          adapters={adapters}
+          onRestartTraining={fetchTrainStatus}
         />
+      )}
+
+      {/* ── QA Review Modal ── */}
+      {qaReviewOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h2 className="font-semibold text-gray-700">Review Training Data</h2>
+              <button onClick={() => setQaReviewOpen(false)} className="text-gray-500 hover:text-gray-700">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {qaLoading ? (
+                <p className="text-center text-gray-500 py-8">Loading...</p>
+              ) : qaItems.length === 0 ? (
+                <p className="text-center text-gray-500 py-8">No training data to review yet.</p>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between text-sm text-gray-500">
+                    <span>Item {qaCurrentIndex + 1} of {qaItems.length}</span>
+                    <span>{qaItems[qaCurrentIndex]?.validated ? "✓ Validated" : qaItems[qaCurrentIndex]?.retry_count >= 3 ? "⚠ Needs review" : "Pending"}</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Question</label>
+                    <textarea
+                      value={qaItems[qaCurrentIndex]?.question || ""}
+                      onChange={(e) => {
+                        const newItems = [...qaItems];
+                        newItems[qaCurrentIndex].question = e.target.value;
+                        newItems[qaCurrentIndex].edited = true;
+                        setQaItems(newItems);
+                      }}
+                      className="w-full text-sm px-3 py-2 rounded border border-gray-300 resize-none"
+                      rows={3}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Answer</label>
+                    <textarea
+                      value={qaItems[qaCurrentIndex]?.answer || ""}
+                      onChange={(e) => {
+                        const newItems = [...qaItems];
+                        newItems[qaCurrentIndex].answer = e.target.value;
+                        newItems[qaCurrentIndex].edited = true;
+                        setQaItems(newItems);
+                      }}
+                      className="w-full text-sm px-3 py-2 rounded border border-gray-300 resize-none"
+                      rows={6}
+                    />
+                  </div>
+                  {qaItems[qaCurrentIndex]?.validation_notes && (
+                    <p className="text-xs text-gray-500 bg-gray-50 p-2 rounded">{qaItems[qaCurrentIndex].validation_notes}</p>
+                  )}
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setQaCurrentIndex(Math.max(0, qaCurrentIndex - 1))}
+                      disabled={qaCurrentIndex === 0}
+                      className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => updateQaItem(qaItems[qaCurrentIndex].id, {validated: true})}
+                      className="text-xs px-3 py-1.5 rounded bg-green-100 hover:bg-green-200 text-green-700"
+                    >
+                      Mark Validated
+                    </button>
+                    <button
+                      onClick={() => setQaCurrentIndex(Math.min(qaItems.length - 1, qaCurrentIndex + 1))}
+                      disabled={qaCurrentIndex === qaItems.length - 1}
+                      className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-between px-4 py-3 border-t">
+              <button
+                onClick={() => {
+                  if (qaItems[qaCurrentIndex]?.edited) {
+                    updateQaItem(qaItems[qaCurrentIndex].id, {
+                      question: qaItems[qaCurrentIndex].question,
+                      answer: qaItems[qaCurrentIndex].answer,
+                    });
+                  }
+                }}
+                className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200"
+              >
+                Save Current
+              </button>
+              <button
+                onClick={async () => {
+                  await markAllValidated();
+                  if (session) {
+                    try {
+                      const resp = await fetch(`${API_URL}/sessions/${session.id}/start-training`, { method: "POST" });
+                      if (resp.ok) {
+                        setQaReviewOpen(false);
+                        await fetchSessions();
+                        await fetchTrainStatus();
+                      }
+                    } catch {}
+                  }
+                }}
+                className="text-xs px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white"
+              >
+                Validate All & Start Training
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

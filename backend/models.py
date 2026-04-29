@@ -7,8 +7,15 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey,
-    Integer, String, Text, JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    JSON,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -25,6 +32,8 @@ def _now() -> datetime:
 class SessionState(str, enum.Enum):
     ACTIVE = "ACTIVE"
     PRE_SLEEP_WARNING = "PRE_SLEEP_WARNING"
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    VALIDATING = "VALIDATING"
     SLEEPING = "SLEEPING"
     TRAINING = "TRAINING"
     EVALUATING = "EVALUATING"
@@ -40,8 +49,12 @@ class Session(Base):
     state = Column(String, nullable=False, default=SessionState.ACTIVE)
     total_tokens = Column(Integer, nullable=False, default=0)
     max_tokens = Column(Integer, nullable=False, default=4096)
+    system_prompt = Column(Text, nullable=True)
+    training_system_prompt = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
-    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
     closed_at = Column(DateTime(timezone=True), nullable=True)
     metadata_ = Column("metadata", JSON, nullable=False, default=dict)
 
@@ -55,8 +68,12 @@ class Turn(Base):
     __tablename__ = "turns"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    session_id = Column(UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
-    role = Column(String, nullable=False)          # user | assistant | system
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role = Column(String, nullable=False)  # user | assistant | system
     content = Column(Text, nullable=False)
     token_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
@@ -128,7 +145,7 @@ class ModelVersion(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), ForeignKey("training_runs.id"), nullable=False)
-    version_tag = Column(String, nullable=False)        # e.g. "v0.4"
+    version_tag = Column(String, nullable=False)  # e.g. "v0.4"
     adapter_s3_path = Column(String, nullable=False)
     is_production = Column(Boolean, nullable=False, default=False)
     eval_score = Column(Float, nullable=True)
@@ -144,10 +161,65 @@ class DeploymentEvent(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id = Column(UUID(as_uuid=True), ForeignKey("training_runs.id"), nullable=False)
-    event_type = Column(String, nullable=False)  # PROMOTE | ROLLBACK | SMOKE_TEST_PASS | SMOKE_TEST_FAIL
+    event_type = Column(
+        String, nullable=False
+    )  # PROMOTE | ROLLBACK | SMOKE_TEST_PASS | SMOKE_TEST_FAIL
     from_version = Column(String, nullable=True)
     to_version = Column(String, nullable=True)
     reason = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
 
     run = relationship("TrainingRun", back_populates="deployment_events")
+
+
+class KnowledgeRecord(Base):
+    __tablename__ = "knowledge_records"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    topic = Column(String, nullable=False)
+    facts = Column(JSON, nullable=False, default=list)
+    source_turn_id = Column(UUID(as_uuid=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    session = relationship("Session")
+
+
+class SynthesizedQA(Base):
+    __tablename__ = "synthesized_qa"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    knowledge_record_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_records.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    validated = Column(Boolean, nullable=False, default=False)
+    edited = Column(Boolean, nullable=False, default=False)
+    retry_count = Column(Integer, nullable=False, default=0)
+    validation_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    session = relationship("Session")
+    knowledge_record = relationship("KnowledgeRecord")
+
+
+class KnowledgeCorpus(Base):
+    __tablename__ = "knowledge_corpus"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    topic = Column(String, nullable=False)
+    facts = Column(JSON, nullable=False, default=list)
+    source_session_id = Column(UUID(as_uuid=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)

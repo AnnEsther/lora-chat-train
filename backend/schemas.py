@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 # ── Session schemas ───────────────────────────────────────────────────────────
 
+
 class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -18,6 +19,8 @@ class SessionResponse(BaseModel):
     state: str
     total_tokens: int
     max_tokens: int
+    system_prompt: Optional[str] = None
+    training_system_prompt: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     closed_at: Optional[datetime] = None
@@ -27,13 +30,21 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionResponse]
 
 
+class CreateSessionRequest(BaseModel):
+    adapter_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    training_system_prompt: Optional[str] = None
+
+
 # ── Chat schemas ──────────────────────────────────────────────────────────────
+
 
 class ChatRequest(BaseModel):
     message: str
 
 
 # ── Training run schemas ──────────────────────────────────────────────────────
+
 
 class TrainingRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -50,6 +61,7 @@ class TrainingRunResponse(BaseModel):
 
 
 # ── Model version schemas ─────────────────────────────────────────────────────
+
 
 class ModelVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

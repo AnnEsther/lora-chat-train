@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from dotenv import load_dotenv
+
 _root = Path(__file__).parent.parent.parent
 load_dotenv(_root / ".env")
 sys.path.insert(0, str(_root))
@@ -30,6 +31,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import (
     AutoModelForCausalLM,
@@ -41,45 +43,58 @@ from peft import LoraConfig, PeftModel, get_peft_model, TaskType
 from trl import SFTConfig, SFTTrainer
 from datasets import Dataset as HFDataset
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BASE_MODEL          = os.environ.get("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-HF_TOKEN            = os.environ.get("HF_TOKEN", "")
-ADAPTER_DIR         = Path(os.environ.get("ADAPTER_DIR",         _root / "adapters" / "current"))
-HISTORY_DIR         = Path(os.environ.get("ADAPTER_HISTORY_DIR", _root / "adapters" / "history"))
-OUTPUT_DIR          = Path(os.environ.get("LOCAL_OUTPUT_DIR",    _root / "outputs"))
-LORA_R              = int(os.environ.get("LORA_R", 16))
-LORA_ALPHA          = int(os.environ.get("LORA_ALPHA", 32))
-LORA_DROPOUT        = float(os.environ.get("LORA_DROPOUT", 0.05))
+BASE_MODEL = os.environ.get("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+ADAPTER_DIR = Path(os.environ.get("ADAPTER_DIR", _root / "adapters" / "current"))
+HISTORY_DIR = Path(
+    os.environ.get("ADAPTER_HISTORY_DIR", _root / "adapters" / "history")
+)
+OUTPUT_DIR = Path(os.environ.get("LOCAL_OUTPUT_DIR", _root / "outputs"))
+LORA_R = int(os.environ.get("LORA_R", 16))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", 32))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", 0.05))
 LORA_TARGET_MODULES = os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(",")
-TRAIN_EPOCHS        = int(os.environ.get("TRAIN_EPOCHS", 3))
-TRAIN_BATCH_SIZE    = int(os.environ.get("TRAIN_BATCH_SIZE", 1))
-TRAIN_GRAD_ACCUM    = int(os.environ.get("TRAIN_GRAD_ACCUM", 8))
-TRAIN_LR            = float(os.environ.get("TRAIN_LR", 2e-4))
-MAX_SEQ_LENGTH      = int(os.environ.get("MAX_SEQ_LENGTH", 256))
+TRAIN_EPOCHS = int(os.environ.get("TRAIN_EPOCHS", 3))
+TRAIN_BATCH_SIZE = int(os.environ.get("TRAIN_BATCH_SIZE", 1))
+TRAIN_GRAD_ACCUM = int(os.environ.get("TRAIN_GRAD_ACCUM", 8))
+TRAIN_LR = float(os.environ.get("TRAIN_LR", 2e-4))
+MAX_SEQ_LENGTH = int(os.environ.get("MAX_SEQ_LENGTH", 256))
 
 # ── Global state ──────────────────────────────────────────────────────────────
-_model_lock      = threading.Lock()
-_model           = None
-_tokenizer       = None
+_model_lock = threading.Lock()
+_model = None
+_tokenizer = None
 _adapter_path: Optional[str] = None
 _training_active = False
-_training_status: dict = {"status": "idle", "progress": "", "started_at": None, "finished_at": None}
+_training_status: dict = {
+    "status": "idle",
+    "progress": "",
+    "started_at": None,
+    "finished_at": None,
+}
 
 
 # ── GPU check ─────────────────────────────────────────────────────────────────
 
+
 def _check_gpu() -> None:
     if not torch.cuda.is_available():
-        raise RuntimeError("No CUDA GPU found. Install torch with: pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        raise RuntimeError(
+            "No CUDA GPU found. Install torch with: pip install torch --index-url https://download.pytorch.org/whl/cu121"
+        )
     name = torch.cuda.get_device_name(0)
     vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
     logger.info(f"GPU detected: {name} ({vram:.1f} GB VRAM)")
 
 
 # ── BnB config — bf16 throughout to match Qwen's native dtype ────────────────
+
 
 def _bnb_config() -> BitsAndBytesConfig:
     return BitsAndBytesConfig(
@@ -92,12 +107,15 @@ def _bnb_config() -> BitsAndBytesConfig:
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
+
 def _load_base_model() -> None:
     global _model, _tokenizer
     logger.info(f"Loading base model: {BASE_MODEL}")
 
     _tokenizer = AutoTokenizer.from_pretrained(
-        BASE_MODEL, token=HF_TOKEN or None, trust_remote_code=True,
+        BASE_MODEL,
+        token=HF_TOKEN or None,
+        trust_remote_code=True,
     )
     _tokenizer.pad_token = _tokenizer.eos_token
     _tokenizer.padding_side = "right"
@@ -108,7 +126,7 @@ def _load_base_model() -> None:
         device_map="auto",
         token=HF_TOKEN or None,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16,             # load everything in bf16
+        torch_dtype=torch.bfloat16,  # load everything in bf16
     )
     _model.config.use_cache = False
     _model.eval()
@@ -120,27 +138,33 @@ def _load_adapter(adapter_dir: Path) -> None:
     if not adapter_dir.exists():
         logger.warning(f"Adapter dir not found: {adapter_dir} — using base model")
         return
+    adapter_path_str = str(adapter_dir.resolve())
     with _model_lock:
         if isinstance(_model, PeftModel):
             logger.info("Unloading existing adapter")
             _model = _model.merge_and_unload()
             _model.eval()
-        logger.info(f"Loading adapter: {adapter_dir}")
-        _model = PeftModel.from_pretrained(_model, str(adapter_dir), is_trainable=False)
+        logger.info(f"Loading adapter: {adapter_path_str}")
+        _model = PeftModel.from_pretrained(_model, adapter_path_str, is_trainable=False)
         _model.eval()
-        _adapter_path = str(adapter_dir)
+        _adapter_path = adapter_path_str
         logger.info("Adapter loaded")
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
 
+
 def _build_prompt(messages: list[dict]) -> str:
-    return _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return _tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
 
 def _stream_tokens(prompt: str, max_new_tokens: int, temperature: float):
     inputs = _tokenizer(prompt, return_tensors="pt").to("cuda")
-    streamer = TextIteratorStreamer(_tokenizer, skip_prompt=True, skip_special_tokens=True)
+    streamer = TextIteratorStreamer(
+        _tokenizer, skip_prompt=True, skip_special_tokens=True
+    )
     gen_kwargs = dict(
         **inputs,
         streamer=streamer,
@@ -149,16 +173,19 @@ def _stream_tokens(prompt: str, max_new_tokens: int, temperature: float):
         do_sample=temperature > 0,
         pad_token_id=_tokenizer.eos_token_id,
     )
+
     def _generate():
         with _model_lock:
             with torch.no_grad():
                 _model.generate(**gen_kwargs)
+
     t = threading.Thread(target=_generate, daemon=True)
     t.start()
     return streamer, t
 
 
 # ── Training ──────────────────────────────────────────────────────────────────
+
 
 def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
     global _training_active, _training_status, _model
@@ -187,8 +214,11 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             raise ValueError("Dataset is empty")
 
         def _fmt(ex):
-            return {"text": _tokenizer.apply_chat_template(
-                ex["messages"], tokenize=False, add_generation_prompt=False)}
+            return {
+                "text": _tokenizer.apply_chat_template(
+                    ex["messages"], tokenize=False, add_generation_prompt=False
+                )
+            }
 
         hf_dataset = HFDataset.from_list(records).map(_fmt)
         logger.info(f"Dataset: {len(records)} samples")
@@ -206,13 +236,17 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             quantization_config=_bnb_config(),
             device_map="auto",
             token=HF_TOKEN or None,
-            torch_dtype=torch.bfloat16,         # bf16 throughout — no fp16 mixing
+            torch_dtype=torch.bfloat16,  # bf16 throughout — no fp16 mixing
         )
         train_model.config.use_cache = False
 
         lora_config = LoraConfig(
-            r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-            target_modules=LORA_TARGET_MODULES, bias="none", task_type=TaskType.CAUSAL_LM,
+            r=LORA_R,
+            lora_alpha=LORA_ALPHA,
+            lora_dropout=LORA_DROPOUT,
+            target_modules=LORA_TARGET_MODULES,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
         )
         train_model = get_peft_model(train_model, lora_config)
         train_model.print_trainable_parameters()
@@ -226,14 +260,14 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             learning_rate=TRAIN_LR,
             lr_scheduler_type="cosine",
             warmup_ratio=0.05,
-            fp16=False,                         # must be False for Qwen/bf16 models
-            bf16=True,                          # use bf16 — matches model's native dtype
+            fp16=False,  # must be False for Qwen/bf16 models
+            bf16=True,  # use bf16 — matches model's native dtype
             optim="paged_adamw_8bit",
             logging_steps=5,
             save_strategy="no",
             report_to="none",
-            dataloader_pin_memory=False,        # avoids Windows CUDA issues
-            max_length=MAX_SEQ_LENGTH,          # correct arg name in trl >= 0.13
+            dataloader_pin_memory=False,  # avoids Windows CUDA issues
+            max_length=MAX_SEQ_LENGTH,  # correct arg name in trl >= 0.13
             dataset_text_field="text",
         )
 
@@ -241,7 +275,7 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             model=train_model,
             args=sft_config,
             train_dataset=hf_dataset,
-            processing_class=_tokenizer,        # replaces tokenizer= in trl >= 0.9
+            processing_class=_tokenizer,  # replaces tokenizer= in trl >= 0.9
         )
 
         trainer.train()
@@ -257,8 +291,24 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
         _training_status["progress"] = "Complete — loading new adapter…"
 
         # ── Hot-swap adapter ───────────────────────────────────────────────────
+        import shutil
+
         _archive_current_adapter(run_id)
         _load_adapter(output_dir)
+
+        # Copy adapter files to current adapter directory
+        ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
+        for item in output_dir.iterdir():
+            dest = ADAPTER_DIR / item.name
+            if dest.exists():
+                if dest.is_dir():
+                    shutil.rmtree(dest)
+                else:
+                    dest.unlink()
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
 
         manifest = {
             "version": run_id[:8],
@@ -267,29 +317,33 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             "samples": len(records),
             "adapter_dir": str(output_dir),
         }
-        ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
         (ADAPTER_DIR / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
-        _training_status.update({
-            "status": "completed",
-            "progress": f"Adapter {run_id[:8]} is live",
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        })
+        _training_status.update(
+            {
+                "status": "completed",
+                "progress": f"Adapter {run_id[:8]} is live",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         logger.info("Adapter hot-swapped — model ready")
 
     except Exception as exc:
         logger.error(f"Training failed: {exc}", exc_info=True)
-        _training_status.update({
-            "status": "failed",
-            "progress": f"Failed: {exc}",
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        })
+        _training_status.update(
+            {
+                "status": "failed",
+                "progress": f"Failed: {exc}",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     finally:
         _training_active = False
 
 
 def _archive_current_adapter(run_id: str) -> None:
     import shutil
+
     if not ADAPTER_DIR.exists():
         return
     version = "unknown"
@@ -308,18 +362,32 @@ def _archive_current_adapter(run_id: str) -> None:
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _check_gpu()
     _load_base_model()
     if ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir()):
-        _load_adapter(ADAPTER_DIR)
+        try:
+            _load_adapter(ADAPTER_DIR)
+        except Exception as exc:
+            logger.warning(
+                f"Failed to load adapter at startup: {exc} — using base model"
+            )
     else:
         logger.info("No existing adapter — using base model")
     yield
 
 
 app = FastAPI(title="LoRA Local GPU Server", version="1.0.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -379,10 +447,12 @@ async def generate(req: GenerateRequest) -> dict:
     inputs = _tokenizer(prompt, return_tensors="pt").to("cuda")
     with _model_lock, torch.no_grad():
         outputs = _model.generate(
-            **inputs, max_new_tokens=req.max_new_tokens,
-            do_sample=False, pad_token_id=_tokenizer.eos_token_id,
+            **inputs,
+            max_new_tokens=req.max_new_tokens,
+            do_sample=False,
+            pad_token_id=_tokenizer.eos_token_id,
         )
-    generated = outputs[0][inputs["input_ids"].shape[-1]:]
+    generated = outputs[0][inputs["input_ids"].shape[-1] :]
     return {"response": _tokenizer.decode(generated, skip_special_tokens=True)}
 
 
@@ -414,17 +484,44 @@ async def train(req: TrainRequest) -> dict:
 @app.get("/train/status")
 async def train_status() -> dict:
     vram_used = vram_free = None
-    if torch.cuda.is_available():
-        vram_used = round(torch.cuda.memory_allocated(0) / 1024**3, 2)
-        vram_free = round(
-            (torch.cuda.get_device_properties(0).total_memory
-             - torch.cuda.memory_allocated(0)) / 1024**3, 2
-        )
-    return {**_training_status, "vram_used_gb": vram_used, "vram_free_gb": vram_free}
+    try:
+        if torch.cuda.is_available():
+            vram_used = round(torch.cuda.memory_allocated(0) / 1024**3, 2)
+            vram_free = round(
+                (
+                    torch.cuda.get_device_properties(0).total_memory
+                    - torch.cuda.memory_allocated(0)
+                )
+                / 1024**3,
+                2,
+            )
+    except Exception as e:
+        logger.warning(f"GPU stats error: {e}")
+
+    try:
+        return {
+            "status": _training_status.get("status", "idle"),
+            "progress": _training_status.get("progress", ""),
+            "started_at": _training_status.get("started_at"),
+            "finished_at": _training_status.get("finished_at"),
+            "vram_used_gb": vram_used,
+            "vram_free_gb": vram_free,
+        }
+    except Exception as e:
+        logger.warning(f"Training status error: {e}")
+        return {"status": "idle", "progress": "", "error": str(e)}
 
 
 @app.post("/reload_adapter")
 async def reload_adapter(req: ReloadRequest) -> dict:
+    if req.adapter_dir == "base":
+        with _model_lock:
+            global _model, _adapter_path
+            if _model is not None and isinstance(_model, PeftModel):
+                _model = _model.merge_and_unload()
+                _model.eval()
+            _adapter_path = None
+        return {"status": "ok", "adapter_dir": "base (no adapter)"}
     adapter_path = Path(req.adapter_dir)
     if not adapter_path.exists():
         raise HTTPException(404, f"Adapter dir not found: {req.adapter_dir}")
@@ -433,14 +530,68 @@ async def reload_adapter(req: ReloadRequest) -> dict:
     return {"status": "ok", "adapter_dir": str(adapter_path)}
 
 
+@app.get("/adapters")
+async def list_adapters() -> dict:
+    adapters = [{"id": "base", "version": "Base model", "path": "", "is_base": True}]
+    try:
+        if HISTORY_DIR.exists():
+            for hist_dir in sorted(HISTORY_DIR.iterdir()):
+                if hist_dir.is_dir():
+                    manifest_path = hist_dir / "manifest.json"
+                    version = hist_dir.name
+                    trained_at = None
+                    if manifest_path.exists():
+                        try:
+                            manifest = json.loads(manifest_path.read_text())
+                            version = manifest.get("version", hist_dir.name)
+                            trained_at = manifest.get("trained_at")
+                        except Exception:
+                            pass
+                    adapters.append(
+                        {
+                            "id": str(hist_dir.name),
+                            "version": version,
+                            "path": str(hist_dir),
+                            "trained_at": trained_at,
+                        }
+                    )
+        if ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir()):
+            current_manifest = ADAPTER_DIR / "manifest.json"
+            current_version = "v1 (live)"
+            if current_manifest.exists():
+                try:
+                    current_version = (
+                        json.loads(current_manifest.read_text()).get("version", "v1")
+                        + " (live)"
+                    )
+                except Exception:
+                    pass
+            adapters.append(
+                {
+                    "id": "current",
+                    "version": current_version,
+                    "path": str(ADAPTER_DIR),
+                    "trained_at": None,
+                    "is_current": True,
+                }
+            )
+    except PermissionError as e:
+        logger.warning(f"Permission error listing adapters: {e}")
+    except Exception as e:
+        logger.warning(f"Error listing adapters: {e}")
+    return {"adapters": adapters}
+
+
 @app.get("/health")
 async def health() -> dict:
     gpu_info = {}
     if torch.cuda.is_available():
         gpu_info = {
             "name": torch.cuda.get_device_name(0),
-            "vram_total_gb": round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1),
-            "vram_used_gb":  round(torch.cuda.memory_allocated(0) / 1024**3, 2),
+            "vram_total_gb": round(
+                torch.cuda.get_device_properties(0).total_memory / 1024**3, 1
+            ),
+            "vram_used_gb": round(torch.cuda.memory_allocated(0) / 1024**3, 2),
         }
     return {
         "status": "ok",

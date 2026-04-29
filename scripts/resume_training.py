@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(".").resolve()))
 sys.path.insert(0, str(Path("backend").resolve()))
 
 # Paste your session_id and run_id from the Celery logs
-SESSION_ID = "391d3009-a6e9-4b9a-804c-ce3c090f6534"   # e.g. "b1dcc350-a003-4efc-99c5-98f8f9408754"
-RUN_ID     = "3c15a7cf-ce48-4feb-9c52-e5ee25b7992f"       # e.g. "3c15a7cf-ce48-4feb-9c52-e5ee25b7992f"
+SESSION_ID = "ab0911a1-3768-47d9-acfd-521ca9446ce1"   # e.g. "b1dcc350-a003-4efc-99c5-98f8f9408754"
+RUN_ID     = "0c3f8085-c671-4225-9d47-f0345630e654"       # e.g. "3c15a7cf-ce48-4feb-9c52-e5ee25b7992f"
 
 # Find the dataset that was already built
 output_dir = Path(os.environ.get("LOCAL_OUTPUT_DIR", "outputs"))

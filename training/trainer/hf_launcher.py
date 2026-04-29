@@ -45,12 +45,19 @@ class HFTrainingLauncher:
             "Content-Type": "application/json",
         }
 
-    def build_config(self, run_id: str, session_id: str, dataset_s3_path: str) -> dict:
+    def build_config(
+        self,
+        run_id: str,
+        session_id: str,
+        dataset_s3_path: str,
+        dataset_local_path: str = "",
+    ) -> dict:
         return {
             "run_id": run_id,
             "session_id": session_id,
             "base_model": BASE_MODEL,
             "dataset_s3_path": dataset_s3_path,
+            "dataset_local_path": dataset_local_path,
             "lora": {
                 "r": LORA_R,
                 "lora_alpha": LORA_ALPHA,
@@ -80,6 +87,7 @@ class HFTrainingLauncher:
         if not HF_TRAINING_ENDPOINT:
             # Fall back to local GPU training via model server
             import os, requests as req
+
             model_server = os.environ.get("MODEL_SERVER_URL", "http://localhost:8001")
             dataset_path = config.get("dataset_local_path", "")
             run_id = config.get("run_id", "unknown")
@@ -100,8 +108,10 @@ class HFTrainingLauncher:
             data = resp.json()
             raw_status = data.get("status", "unknown").lower()
         except requests.RequestException as exc:
-            logger.warning("hf_poll_error", extra={"job_id": hf_job_id, "error": str(exc)})
-            return "running"   # assume still running on transient error
+            logger.warning(
+                "hf_poll_error", extra={"job_id": hf_job_id, "error": str(exc)}
+            )
+            return "running"  # assume still running on transient error
 
         if raw_status in ("completed", "succeeded", "done"):
             return "succeeded"
@@ -122,7 +132,7 @@ class HFTrainingLauncher:
         url = f"{HF_TRAINING_ENDPOINT}/{hf_job_id}/logs"
         try:
             resp = requests.get(url, headers=self.headers, timeout=30)
-            return resp.text[:50_000]    # cap log size
+            return resp.text[:50_000]  # cap log size
         except Exception as exc:
             return f"[log retrieval failed: {exc}]"
 
@@ -136,7 +146,9 @@ class HFTrainingLauncher:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         artifact_url = f"{HF_TRAINING_ENDPOINT}/{hf_job_id}/artifacts"
-        resp = requests.get(artifact_url, headers=self.headers, timeout=120, stream=True)
+        resp = requests.get(
+            artifact_url, headers=self.headers, timeout=120, stream=True
+        )
 
         if resp.status_code == 200 and "zip" in resp.headers.get("Content-Type", ""):
             with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
@@ -145,11 +157,14 @@ class HFTrainingLauncher:
             # Fallback: write raw bytes as a single artifact file
             (output_dir / "adapter.bin").write_bytes(resp.content)
 
-        logger.info("artifacts_downloaded", extra={"run_id": run_id, "path": str(output_dir)})
+        logger.info(
+            "artifacts_downloaded", extra={"run_id": run_id, "path": str(output_dir)}
+        )
         return output_dir
 
 
 # ── Local SFTTrainer (run inside container or RunPod) ─────────────────────────
+
 
 def train_local(config: dict, dataset_path: Path) -> Path:
     """
@@ -162,7 +177,10 @@ def train_local(config: dict, dataset_path: Path) -> Path:
     from datasets import load_dataset
     from peft import LoraConfig, get_peft_model, TaskType
     from transformers import (
-        AutoModelForCausalLM, AutoTokenizer, TrainingArguments, BitsAndBytesConfig
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        TrainingArguments,
+        BitsAndBytesConfig,
     )
     from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 
@@ -172,7 +190,10 @@ def train_local(config: dict, dataset_path: Path) -> Path:
     output_dir = Path(train_cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("local_training_start", extra={"run_id": run_id, "base_model": config["base_model"]})
+    logger.info(
+        "local_training_start",
+        extra={"run_id": run_id, "base_model": config["base_model"]},
+    )
 
     # 4-bit quantisation for memory efficiency on smaller GPUs
     bnb_config = BitsAndBytesConfig(
@@ -224,7 +245,7 @@ def train_local(config: dict, dataset_path: Path) -> Path:
         optim=train_cfg.get("optim", "paged_adamw_8bit"),
         logging_steps=train_cfg.get("logging_steps", 10),
         save_steps=train_cfg.get("save_steps", 50),
-        report_to="none",   # avoid wandb dependency
+        report_to="none",  # avoid wandb dependency
     )
 
     trainer = SFTTrainer(

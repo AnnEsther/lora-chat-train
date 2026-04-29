@@ -68,15 +68,34 @@ set PYTHONPATH=%cd%
 
 
 START UP
-docker compose up -d postgres redis
-python backend/model_server/local_gpu_serve.py
-uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
-celery -A worker.tasks worker --loglevel=info --concurrency=2
-celery -A worker.tasks worker --loglevel=info --pool=gevent --concurrency=4
+1
+    docker compose up -d postgres redis
+2
+    python backend/model_server/local_gpu_serve.py
+3
+    uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
+#    python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+4
+    celery -A worker.tasks worker --loglevel=info --pool=gevent --concurrency=4
+5
+    cd frontend
+    npm run dev
 
-cd frontend
-npm run dev
+python backend/model_server/local_gpu_serve.py
+python.exe backend/main.py
+python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 # kill tasks using port 8000
-netstat -ano | findstr :8000
+netstat -ano | findstr :8002
 taskkill /PID 16720 /F
+
+#restart training
+in docker terminal postgres
+    psql -U lora
+    SELECT id, session_id, status, hf_job_id FROM training_runs WHERE status != 'SUCCEEDED';
+    ab0911a1-3768-47d9-acfd-521ca9446ce1
+
+docker compose build --no-cache worker && docker compose up -d worker
+
+
+icacls "outputs" /grant Everyone:(OI)(CI)F /T

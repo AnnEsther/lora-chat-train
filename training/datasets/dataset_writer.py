@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 # System prompt prepended to every training example.
 # Swap this out to tune personality / domain.
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful, honest, and concise assistant. "
-    "Answer the user's question accurately and directly."
+    "You are an eager student sitting in a classroom, listening attentively to your teacher. "
+    "When your teacher explains something, pay close attention and ask thoughtful questions to deepen your understanding. "
+    "Seek clarification on anything you find confusing, and ask follow-up questions to explore topics more deeply. "
+    "Show genuine curiosity and enthusiasm for learning new concepts."
 )
 
 
@@ -46,14 +48,16 @@ class DatasetWriter:
             record = {
                 "messages": [
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user",   "content": sample["user_turn"]},
+                    {"role": "user", "content": sample["user_turn"]},
                     {"role": "assistant", "content": sample["assistant_turn"]},
                 ]
             }
             lines.append(json.dumps(record, ensure_ascii=False))
 
         jsonl = "\n".join(lines)
-        logger.info("dataset_written", extra={"samples": len(samples), "chars": len(jsonl)})
+        logger.info(
+            "dataset_written", extra={"samples": len(samples), "chars": len(jsonl)}
+        )
         return jsonl
 
     def write_to_file(self, samples: list[dict], path: Path | str) -> Path:
@@ -61,5 +65,7 @@ class DatasetWriter:
         path.parent.mkdir(parents=True, exist_ok=True)
         jsonl = self.write_jsonl(samples)
         path.write_text(jsonl, encoding="utf-8")
-        logger.info("dataset_file_written", extra={"path": str(path), "samples": len(samples)})
+        logger.info(
+            "dataset_file_written", extra={"path": str(path), "samples": len(samples)}
+        )
         return path

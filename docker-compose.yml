@@ -65,6 +65,7 @@ services:
       - ./worker:/app
       - ./shared:/app/shared
       - ./training:/app/training
+      - ./outputs:/app/outputs
     command: celery -A tasks worker --loglevel=info --concurrency=2
 
   # ── Model server ────────────────────────────────────────────────────────────
@@ -77,11 +78,16 @@ services:
       - "8001:8001"
     volumes:
       - adapter_store:/adapters
+      - ./outputs:/app/outputs
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: [gpu]
+    environment:
+      LOCAL_OUTPUT_DIR: /app/outputs
+      ADAPTER_DIR: /adapters/current
+      ADAPTER_HISTORY_DIR: /adapters/history
     command: python -m model_server.serve
 
   # ── Frontend ────────────────────────────────────────────────────────────────
