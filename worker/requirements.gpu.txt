@@ -1,0 +1,16 @@
+# Local GPU training dependencies for the Celery worker.
+# Only needed when HF_TRAINING_ENDPOINT is not set and training
+# falls back to local_gpu_serve.py on a machine with an NVIDIA GPU.
+# NOT installed in the cloud worker image — see requirements.txt.
+
+-r requirements.txt
+
+# ML / GPU stack
+torch==2.4.1
+transformers==4.45.2
+peft==0.13.0
+trl==0.11.4
+accelerate==1.0.1
+bitsandbytes==0.44.1
+sentencepiece==0.2.0
+datasets==3.0.1

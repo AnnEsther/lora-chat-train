@@ -1,16 +1,13 @@
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM python:3.11-slim
+
+# Cloud inference proxy — no GPU, no ML frameworks.
+# hf_serve.py forwards requests to a private HF vLLM Inference Endpoint.
+# Only needs httpx, fastapi, uvicorn, and python-dotenv.
 
 WORKDIR /app
 
-# Install Python 3.11 from deadsnakes PPA
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python3.11 python3.11-dev python3-pip gcc curl \
-    && ln -sf python3.11 /usr/bin/python3 \
-    && ln -sf python3 /usr/bin/python \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.model.txt .
@@ -21,9 +18,9 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Adapter mount point
+# Adapter mount point (kept for /adapters listing endpoint compatibility)
 VOLUME /adapters
 
 EXPOSE 8001
 
-CMD ["python", "-m", "model_server.serve"]
+CMD ["python", "-m", "model_server.hf_serve"]

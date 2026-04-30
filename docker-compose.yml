@@ -1,8 +1,6 @@
 version: "3.9"
-
 x-env: &common-env
   env_file: .env
-
 services:
   # ── Infrastructure ──────────────────────────────────────────────────────────
   postgres:
@@ -16,22 +14,22 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lora}"]
       interval: 5s
       timeout: 5s
       retries: 5
-
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
-
   # ── Backend API ─────────────────────────────────────────────────────────────
   backend:
     build:
@@ -48,8 +46,8 @@ services:
     volumes:
       - ./backend:/app
       - ./shared:/app/shared
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
+    restart: unless-stopped
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
   # ── Celery worker ───────────────────────────────────────────────────────────
   worker:
     build:
@@ -66,8 +64,8 @@ services:
       - ./shared:/app/shared
       - ./training:/app/training
       - ./outputs:/app/outputs
+    restart: unless-stopped
     command: celery -A tasks worker --loglevel=info --concurrency=2
-
   # ── Model server ────────────────────────────────────────────────────────────
   model_server:
     build:
@@ -79,29 +77,25 @@ services:
     volumes:
       - adapter_store:/adapters
       - ./outputs:/app/outputs
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
     environment:
       LOCAL_OUTPUT_DIR: /app/outputs
       ADAPTER_DIR: /adapters/current
       ADAPTER_HISTORY_DIR: /adapters/history
-    command: python -m model_server.serve
-
+    restart: unless-stopped
+    command: python -m model_server.hf_serve
   # ── Frontend ────────────────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    env_file: .env
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       - backend
-
+    restart: unless-stopped
 volumes:
   postgres_data:
   adapter_store:

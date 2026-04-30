@@ -1,17 +1,22 @@
+# Cloud worker dependencies — pipeline orchestration only.
+# No ML frameworks or GPU libraries.
+# Training is submitted to HF_TRAINING_ENDPOINT, not run locally.
+# For local GPU training deps see requirements.gpu.txt.
+
 celery==5.4.0
 redis==5.1.1
+gevent
+
+# Database
 sqlalchemy==2.0.35
 psycopg2-binary==2.9.9
+
+# AWS S3 artifact upload
 boto3==1.35.36
+
+# HTTP (HF Training Endpoint polling, Slack notifications)
 requests==2.32.3
+httpx==0.27.2
+
+# Shared utilities
 python-dotenv==1.0.1
-# Training pipeline deps (used by tasks that run locally)
-transformers==4.45.2
-peft==0.13.0
-trl==0.11.4
-datasets==3.0.1
-accelerate==1.0.1
-torch==2.4.1
-bitsandbytes==0.44.1
-sentencepiece==0.2.0
-gevent

@@ -1,0 +1,35 @@
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+# Local GPU model server — loads the LLM into VRAM and runs LoRA training.
+# Used with local_gpu_serve.py on machines that have an NVIDIA GPU (e.g. RTX 4060).
+# NOT used in cloud deployment — use Dockerfile.model (hf_serve.py) instead.
+#
+# Usage:
+#   docker build -f Dockerfile.model.gpu -t lora-model-server-gpu .
+#   docker run --gpus all -p 8001:8001 lora-model-server-gpu
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3-pip gcc curl \
+    && ln -sf python3.11 /usr/bin/python3 \
+    && ln -sf python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.model.gpu.txt .
+RUN pip install --no-cache-dir -r requirements.model.gpu.txt
+
+COPY . .
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+VOLUME /adapters
+
+EXPOSE 8001
+
+CMD ["python", "-m", "model_server.local_gpu_serve"]
