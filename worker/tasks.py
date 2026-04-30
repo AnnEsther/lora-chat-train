@@ -73,6 +73,16 @@ def _update_run_status(run_id: str, status: str, db: DBSession, **kwargs) -> Non
         db.commit()
 
 
+def _set_failure_reason(session_id: str, reason: str, db: DBSession) -> None:
+    """Persist a human-readable failure reason on the session row."""
+    from backend.models import Session as ChatSession
+
+    session = db.get(ChatSession, uuid.UUID(session_id))
+    if session:
+        session.failure_reason = reason
+        db.commit()
+
+
 # ── Pipeline tasks ────────────────────────────────────────────────────────────
 
 
@@ -211,8 +221,7 @@ def extract_candidates(self, _prev, session_id: str, run_id: str) -> dict:
                 TrainingCandidate(
                     id=uuid.uuid4(),
                     session_id=uuid.UUID(session_id),
-                    user_turn=c.user_turn,
-                    assistant_turn=c.assistant_turn,
+                    conversation=c.conversation,
                 )
             )
         db.commit()
@@ -249,10 +258,7 @@ def curate_candidates(self, prev: dict, session_id: str, run_id: str) -> dict:
             .scalars()
             .all()
         )
-        candidates = [
-            {"user_turn": r.user_turn, "assistant_turn": r.assistant_turn, "_id": r.id}
-            for r in rows
-        ]
+        candidates = [{"conversation": r.conversation, "_id": r.id} for r in rows]
 
     curator = Curator()
     curated = curator.score_and_filter(candidates)
@@ -344,9 +350,7 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
             .scalars()
             .all()
         )
-        samples = [
-            {"user_turn": r.user_turn, "assistant_turn": r.assistant_turn} for r in rows
-        ]
+        samples = [{"conversation": r.conversation} for r in rows]
 
     writer = DatasetWriter(system_prompt=training_system_prompt)
     jsonl_text = writer.write_jsonl(samples)
@@ -409,8 +413,19 @@ def extract_knowledge(self, prev: dict, session_id: str, run_id: str) -> dict:
         from backend.models import KnowledgeRecord
 
         for row in rows:
-            topics = extractor.extract(row.user_turn, row.assistant_turn)
-            records = normalizer.normalize(row.user_turn, row.assistant_turn, topics)
+            # Flatten conversation into combined user/assistant text for knowledge extraction
+            user_text = " ".join(
+                t["content"]
+                for t in (row.conversation or [])
+                if t.get("role") == "user"
+            )
+            assistant_text = " ".join(
+                t["content"]
+                for t in (row.conversation or [])
+                if t.get("role") == "assistant"
+            )
+            topics = extractor.extract(user_text, assistant_text)
+            records = normalizer.normalize(user_text, assistant_text, topics)
 
             for record in records:
                 kr = KnowledgeRecord(
@@ -492,11 +507,21 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
                 .all()
             )
             for r in rows:
+                user_text = " ".join(
+                    t["content"]
+                    for t in (r.conversation or [])
+                    if t.get("role") == "user"
+                )
+                assistant_text = " ".join(
+                    t["content"]
+                    for t in (r.conversation or [])
+                    if t.get("role") == "assistant"
+                )
                 sq = SynthesizedQA(
                     id=uuid.uuid4(),
                     session_id=uuid.UUID(session_id),
-                    question=r.user_turn,
-                    answer=r.assistant_turn,
+                    question=user_text,
+                    answer=assistant_text,
                 )
                 db.add(sq)
             db.commit()
@@ -523,18 +548,28 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
             )
             qa_pairs = []
             for r in rows:
+                user_text = " ".join(
+                    t["content"]
+                    for t in (r.conversation or [])
+                    if t.get("role") == "user"
+                )
+                assistant_text = " ".join(
+                    t["content"]
+                    for t in (r.conversation or [])
+                    if t.get("role") == "assistant"
+                )
                 sq = SynthesizedQA(
                     id=uuid.uuid4(),
                     session_id=uuid.UUID(session_id),
-                    question=r.user_turn,
-                    answer=r.assistant_turn,
+                    question=user_text,
+                    answer=assistant_text,
                 )
                 db.add(sq)
                 qa_pairs.append(
                     type(
                         "obj",
                         (object,),
-                        {"question": r.user_turn, "answer": r.assistant_turn},
+                        {"question": user_text, "answer": assistant_text},
                     )()
                 )
             db.commit()
@@ -761,6 +796,9 @@ def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
                 run_id, "FAILED", db, finished_at=datetime.now(timezone.utc)
             )
             _update_session_state(session_id, "FAILED", db)
+            _set_failure_reason(
+                session_id, str(error) or "Training job failed on remote.", db
+            )
         training_failed(run_id, error)
         raise RuntimeError(f"Training failed: {error}")
 
@@ -870,6 +908,11 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
         with _db() as db:
             _update_run_status(run_id, "FAILED", db)
             _update_session_state(session_id, "FAILED", db)
+            _set_failure_reason(
+                session_id,
+                "Evaluation failed — the new adapter did not pass quality checks.",
+                db,
+            )
         return {"status": "rejected"}
 
     deployment_approved(run_id, version=run_id[:8])
@@ -899,4 +942,5 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
         with _db() as db:
             _update_run_status(run_id, "FAILED", db)
             _update_session_state(session_id, "FAILED", db)
+            _set_failure_reason(session_id, f"Deployment error: {exc}", db)
         raise

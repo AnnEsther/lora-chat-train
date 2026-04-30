@@ -56,6 +56,7 @@ class Session(Base):
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )
     closed_at = Column(DateTime(timezone=True), nullable=True)
+    failure_reason = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, nullable=False, default=dict)
 
     turns = relationship("Turn", back_populates="session", cascade="all, delete-orphan")
@@ -87,8 +88,7 @@ class TrainingCandidate(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id = Column(UUID(as_uuid=True), ForeignKey("sessions.id"), nullable=False)
-    user_turn = Column(Text, nullable=False)
-    assistant_turn = Column(Text, nullable=False)
+    conversation = Column(JSON, nullable=False, default=list)
     quality_score = Column(Float, nullable=True)
     included = Column(Boolean, nullable=False, default=False)
     rejection_reason = Column(String, nullable=True)

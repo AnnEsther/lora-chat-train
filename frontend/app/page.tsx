@@ -31,6 +31,7 @@ interface Session {
   max_tokens: number;
   system_prompt?: string | null;
   training_system_prompt?: string | null;
+  failure_reason?: string | null;
   created_at: string;
 }
 
@@ -94,7 +95,7 @@ const STATE_LABELS: Record<SessionState, string> = {
   EVALUATING:        "Evaluating…",
   DEPLOYING:         "Deploying…",
   READY:             "Ready — new adapter live",
-  FAILED:            "Failed",
+  FAILED:            "Training failed — chat still active",
 };
 
 // ── Diagnostic panel sub-components ──────────────────────────────────────────
@@ -468,6 +469,7 @@ export default function ChatPage() {
   const [qaCurrentIndex, setQaCurrentIndex] = useState(0);
   const [qaLoading, setQaLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const prevSessionStateRef = useRef<SessionState | null>(null);
 
   // ── Load sessions list ──
   const fetchSessions = useCallback(async () => {
@@ -514,6 +516,13 @@ export default function ChatPage() {
       localStorage.setItem("lora_session_id", session.id);
     }
   }, [session]);
+
+  // ── Keep prevSessionStateRef in sync (for transition detection in polling) ──
+  useEffect(() => {
+    if (session) {
+      prevSessionStateRef.current = session.state;
+    }
+  }, [session?.id]);  // reset ref only when session changes, not on every state poll
 
   // ── Scroll to bottom ──
   useEffect(() => {
@@ -602,6 +611,33 @@ export default function ChatPage() {
         const resp = await fetch(`${API_URL}/sessions/${session.id}`);
         if (resp.ok) {
           const data: Session = await resp.json();
+          const prev = prevSessionStateRef.current;
+
+          // Inject a system message when session first enters FAILED
+          if (data.state === "FAILED" && prev !== "FAILED") {
+            const reason = data.failure_reason ?? "An unknown error occurred.";
+            setMessages((msgs) => [
+              ...msgs,
+              {
+                role: "system",
+                content: `Training failed: ${reason} You can keep chatting or type /sleep to retry fine-tuning.`,
+              },
+            ]);
+          }
+
+          // Inject a system message when session first enters INSUFFICIENT_DATA
+          if (data.state === "INSUFFICIENT_DATA" && prev !== "INSUFFICIENT_DATA") {
+            setMessages((msgs) => [
+              ...msgs,
+              {
+                role: "system",
+                content:
+                  "Not enough usable training data was found (at least 10 good examples are needed). Keep chatting to add more — type /sleep again when you're ready to retry fine-tuning.",
+              },
+            ]);
+          }
+
+          prevSessionStateRef.current = data.state;
           setSession(data);
           if (["READY", "FAILED", "ACTIVE"].includes(data.state)) {
             setPollActive(false);
@@ -718,7 +754,7 @@ export default function ChatPage() {
 
   const sendMessage = useCallback(async () => {
     if (!input.trim() || !session || loading) return;
-    if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state)) return;
+    if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state)) return;
 
     const userMsg = input.trim();
     setInput("");
@@ -789,7 +825,7 @@ export default function ChatPage() {
   };
 
   const isAcceptingInput = session &&
-    ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state) && !loading;
+    ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state) && !loading;
   const tokenPct = session ? Math.min((session.total_tokens / session.max_tokens) * 100, 100) : 0;
 
   return (
@@ -892,7 +928,7 @@ export default function ChatPage() {
                 ))}
               </div>
             </div>
-            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state) && (
+            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state) && (
               <button
                 onClick={openQaReview}
                 className="text-xs px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white transition-colors"
@@ -962,6 +998,8 @@ export default function ChatPage() {
               placeholder={
                 session?.state === "INSUFFICIENT_DATA"
                   ? "Type more messages to add training data… (/sleep when ready)"
+                  : session?.state === "FAILED"
+                  ? "Training failed — keep chatting or type /sleep to retry fine-tuning"
                   : isAcceptingInput
                   ? "Type a message… (Enter to send, /sleep to end session)"
                   : ["SLEEPING","TRAINING","EVALUATING","DEPLOYING"].includes(session?.state ?? "")

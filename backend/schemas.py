@@ -24,6 +24,7 @@ class SessionResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     closed_at: Optional[datetime] = None
+    failure_reason: Optional[str] = None
 
 
 class SessionListResponse(BaseModel):

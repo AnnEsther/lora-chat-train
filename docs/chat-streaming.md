@@ -74,4 +74,5 @@ The chat feature streams model responses to the frontend via Server-Sent Events 
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-04-29 | FAILED sessions no longer freeze chat — input stays active, error shown in chat window via system message; INSUFFICIENT_DATA transition now also injects a system message in the chat window | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

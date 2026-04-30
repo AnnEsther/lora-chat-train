@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     closed_at       TIMESTAMPTZ,
+    failure_reason  TEXT,
     metadata        JSONB NOT NULL DEFAULT '{}'
 );
 
@@ -38,8 +39,7 @@ CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id, created_at);
 CREATE TABLE IF NOT EXISTS training_candidates (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id      UUID NOT NULL REFERENCES sessions(id),
-    user_turn       TEXT NOT NULL,
-    assistant_turn  TEXT NOT NULL,
+    conversation    JSONB NOT NULL DEFAULT '[]',
     quality_score   FLOAT,
     included        BOOLEAN NOT NULL DEFAULT FALSE,
     rejection_reason TEXT,

@@ -20,7 +20,8 @@ Sessions are the core unit of context in this application. Each session tracks a
 | `system_prompt` | TEXT | Inference system prompt (customisable per session) |
 | `training_system_prompt` | TEXT | System prompt injected into the training dataset |
 | `created_at` | TIMESTAMPTZ | Set on insert |
-| `closed_at` | TIMESTAMPTZ | Set when state enters `SLEEPING` or `FAILED` |
+| `closed_at` | TIMESTAMPTZ | Set when state enters `SLEEPING` only |
+| `failure_reason` | TEXT | Human-readable error written on any `FAILED` transition |
 | `updated_at` | TIMESTAMPTZ | Auto-maintained by `touch_updated_at()` trigger |
 
 ## State Machine
@@ -52,7 +53,8 @@ VALIDATING ──→ [user reviews QA modal] ──→ TRAINING ──→ EVALUA
 ## State Transition Logic (`_transition()`)
 - Located at `backend/main.py`
 - Atomically updates `session.state` via SQLAlchemy
-- Sets `closed_at` for terminal states: `SLEEPING`, `FAILED`
+- Sets `closed_at` only for `SLEEPING` — `FAILED` sessions remain open for continued chat
+- `failure_reason` is written by `_set_failure_reason()` in `worker/tasks.py` at each FAILED site
 - Raises `HTTPException(400)` if the state is already set to the target
 
 ## Frontend Behaviour
@@ -60,9 +62,12 @@ VALIDATING ──→ [user reviews QA modal] ──→ TRAINING ──→ EVALUA
 - Falls back to most recent non-`READY` session, or creates a new one
 - Polls `/sessions/{id}` every 3 seconds while session is not in a terminal state
 - Session state drives input disabled/enabled and which modals are shown
+- On transition to `FAILED`: injects a system message in the chat window with the error from `failure_reason`; input remains active so the user can keep chatting or type `/sleep` to retry
+- On transition to `INSUFFICIENT_DATA`: injects a system message in the chat window explaining the shortfall and inviting the user to keep chatting
 
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-04-29 | FAILED sessions no longer set closed_at; failure_reason column added; chat input unlocked on FAILED; system messages injected in chat on FAILED and INSUFFICIENT_DATA transitions | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

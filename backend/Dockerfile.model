@@ -2,8 +2,13 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 WORKDIR /app
 
+# Install Python 3.11 from deadsnakes PPA
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-dev python3-pip gcc curl \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3.11 python3.11-dev python3-pip gcc curl \
     && ln -sf python3.11 /usr/bin/python3 \
     && ln -sf python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*

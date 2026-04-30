@@ -1,12 +1,64 @@
 # Model Server
 
 ## Overview
-The model server is a standalone FastAPI process that owns the GPU. It loads the base LLM (and optionally a LoRA adapter), serves streaming inference, and runs LoRA training on a background thread. The backend talks to it exclusively over HTTP.
+The model server is a standalone FastAPI process that the backend talks to exclusively over HTTP. Three implementations exist — pick one at startup:
+
+| File | Use case | GPU required |
+|------|----------|-------------|
+| `local_gpu_serve.py` | Local dev with RTX 4060; includes inline LoRA training | Yes |
+| `hf_serve.py` | **Private HF Dedicated Inference Endpoint (vLLM)** — no local GPU needed | No |
+| `serve.py` | Docker container deployment; inference + adapter hot-swap only | Yes |
+
+All three expose **identical API endpoints** so `ModelClient`, the backend, Celery workers, and the frontend diagnostic panel work without any code changes regardless of which server is running.
 
 ## Key Files
 - `backend/model_server/local_gpu_serve.py` — Primary server for local RTX 4060 (8 GB VRAM); includes inline training
-- `backend/model_server/serve.py` — Simpler container-oriented server; inference + adapter hot-swap only, no training
+- `backend/model_server/hf_serve.py` — Thin proxy to a **private** HF Dedicated Inference Endpoint (vLLM); no local GPU needed
+- `backend/model_server/serve.py` — Container-oriented server; inference + adapter hot-swap only, no training
 - `backend/model_client.py` — Async HTTP client used by the FastAPI backend to call the model server
+
+## `hf_serve.py` — Private HF Endpoint Proxy (vLLM)
+
+### How it works
+```
+ModelClient → POST /chat (hf_serve.py:8001) → POST /v1/chat/completions (HF vLLM endpoint)
+```
+vLLM returns OpenAI-format SSE (`choices[].delta.content`). `hf_serve.py` translates this to the internal format (`{"text": "..."}`) before yielding, so `ModelClient` needs no changes.
+
+> **Note:** HF has deprecated TGI for new endpoints. Use **vLLM** (or SGLang) when creating new endpoints.
+
+### Setup
+1. Go to [huggingface.co/inference-endpoints](https://huggingface.co/inference-endpoints) and create a **New Endpoint**:
+   - Model: your `BASE_MODEL` (e.g. `meta-llama/Llama-3.2-1B-Instruct`)
+   - Framework: **vLLM**
+   - Hardware: Nvidia L4 (24 GB) or larger
+   - Visibility: **Private** (only your `HF_TOKEN` can access it)
+2. Copy the endpoint URL into `.env`:
+   ```ini
+   HF_ENDPOINT_URL=https://your-endpoint-name.us-east-1.aws.endpoints.huggingface.cloud
+   HF_ENDPOINT_MODEL=meta-llama/Llama-3.2-1B-Instruct  # must match BASE_MODEL
+   ```
+   > **Important:** vLLM requires the real HuggingFace model ID in the request body (not `"tgi"`). `HF_ENDPOINT_MODEL` defaults to `BASE_MODEL` so you only need to set it if they differ.
+3. Start with:
+   ```
+   python backend/model_server/hf_serve.py
+   ```
+   instead of `python backend/model_server/local_gpu_serve.py`.
+
+### Limitations
+- **Training (`/train`)** — returns HTTP 501. Use `local_gpu_serve.py` or set `HF_TRAINING_ENDPOINT` for Celery-based training.
+- **Adapter hot-swap (`/reload_adapter`)** — no-op stub; always logs a warning and returns `status: ok`. The vLLM endpoint always serves the model it was deployed with.
+- **`/train/status`** — always returns `status: idle`.
+- **`/health`** — proxies to vLLM's `/health` endpoint; returns `remote_healthy: true/false`.
+
+### Configuration
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `HF_ENDPOINT_URL` | — | Full URL of your private vLLM endpoint |
+| `HF_TOKEN` | — | HF access token (write scope) |
+| `HF_ENDPOINT_MODEL` | value of `BASE_MODEL` | Model ID in vLLM request body — must match deployed model |
+| `MAX_NEW_TOKENS` | `512` | Default max tokens per response |
+| `TEMPERATURE` | `0.7` | Default sampling temperature |
 
 ## Design Decisions
 - **bf16 throughout** (`local_gpu_serve.py`) — matches Qwen2.5's native dtype; avoids bfloat16/fp16 mismatch errors
@@ -92,4 +144,6 @@ adapters/
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-04-29 | Switched hf_serve.py from TGI to vLLM (TGI deprecated for new endpoints); HF_ENDPOINT_MODEL now defaults to BASE_MODEL | opencode |
+| 2026-04-29 | Added hf_serve.py — thin proxy to private HF Dedicated Inference Endpoint; no local GPU needed for inference | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

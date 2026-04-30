@@ -24,6 +24,7 @@ This folder contains per-feature documentation for the LoRA Chat & Train project
 | [frontend-ui.md](./frontend-ui.md) | Next.js chat UI, state management, polling, QA review modal |
 | [infrastructure.md](./infrastructure.md) | Docker Compose services, volumes, Makefile, env vars |
 | [huggingface-training-hosting.md](./huggingface-training-hosting.md) | HF Inference Endpoint setup, API contract, known bug, GPU tiers |
+| [plan.md](./plan.md) | Step-by-step cloud deployment guide (AWS EC2 + Docker Compose, single machine) |
 
 ## Change Log Conventions
 Each doc has a Change Log table at the bottom. When making changes:

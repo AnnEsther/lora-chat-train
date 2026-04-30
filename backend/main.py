@@ -213,6 +213,7 @@ async def chat(
         SessionState.ACTIVE,
         SessionState.PRE_SLEEP_WARNING,
         SessionState.INSUFFICIENT_DATA,
+        SessionState.FAILED,
     ):
         raise HTTPException(
             status_code=409,
@@ -356,7 +357,7 @@ async def _transition(
 ) -> None:
     old_state = session.state
     session.state = new_state
-    if new_state in (SessionState.SLEEPING, SessionState.FAILED):
+    if new_state == SessionState.SLEEPING:
         from datetime import datetime, timezone
 
         session.closed_at = datetime.now(timezone.utc)
