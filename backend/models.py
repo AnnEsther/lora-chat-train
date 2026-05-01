@@ -181,12 +181,20 @@ class KnowledgeRecord(Base):
         ForeignKey("sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    topic = Column(String, nullable=False)
-    facts = Column(JSON, nullable=False, default=list)
-    source_turn_id = Column(UUID(as_uuid=True), nullable=True)
+    knowledge_record_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_records.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    validated = Column(Boolean, nullable=False, default=False)
+    edited = Column(Boolean, nullable=False, default=False)
+    retry_count = Column(Integer, nullable=False, default=0)
+    validation_notes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
-
-    session = relationship("Session")
+    session = relationship("Session", lazy="noload")
+    knowledge_record = relationship("KnowledgeRecord", lazy="noload")
 
 
 class SynthesizedQA(Base):
