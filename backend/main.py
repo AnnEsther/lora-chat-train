@@ -396,7 +396,7 @@ async def get_session_qa(
     session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ) -> list[dict]:
     """Get all synthesized Q&A for a session."""
-    from backend.models import SynthesizedQA
+    from models import SynthesizedQA
 
     result = await db.execute(
         select(SynthesizedQA).where(SynthesizedQA.session_id == session_id)
@@ -425,7 +425,7 @@ async def update_qa(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Update a Q&A pair (edit)."""
-    from backend.models import SynthesizedQA
+    from models import SynthesizedQA
 
     result = await db.execute(
         select(SynthesizedQA).where(
@@ -457,7 +457,7 @@ async def mark_qa_validated(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Mark all Q&A as validated (user clicked Start Training)."""
-    from backend.models import SynthesizedQA
+    from models import SynthesizedQA
 
     result = await db.execute(
         select(SynthesizedQA).where(
@@ -494,7 +494,7 @@ async def restart_training(
     session = await _get_active_session(session_id, db)
 
     # Get the most recent training run for this session
-    from backend.models import TrainingRun
+    from models import TrainingRun
 
     result = await db.execute(
         select(TrainingRun)
@@ -509,7 +509,7 @@ async def restart_training(
     run_id = str(training_run.id)
 
     # Get dataset path
-    from backend.models import Dataset
+    from models import Dataset
 
     result = await db.execute(
         select(Dataset)
@@ -562,7 +562,7 @@ async def start_training(
         )
 
     # Check if there's at least one validated QA
-    from backend.models import SynthesizedQA
+    from models import SynthesizedQA
 
     result = await db.execute(
         select(SynthesizedQA).where(
