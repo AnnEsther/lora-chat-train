@@ -46,6 +46,7 @@ services:
     volumes:
       - ./backend:/app
       - ./shared:/app/shared
+      - ./worker:/app/worker
     restart: unless-stopped
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
   # ── Celery worker ───────────────────────────────────────────────────────────
