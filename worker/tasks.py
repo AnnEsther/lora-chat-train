@@ -649,6 +649,9 @@ def validate_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
             "needs_review": needs_review_count,
         },
     )
+    
+    with _db() as db:
+        _update_session_state(session_id, "VALIDATING", db)
 
     return {
         "session_id": session_id,
