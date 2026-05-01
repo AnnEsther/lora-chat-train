@@ -33,7 +33,7 @@ services:
   # ── Backend API ─────────────────────────────────────────────────────────────
   backend:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
     <<: *common-env
     ports:
