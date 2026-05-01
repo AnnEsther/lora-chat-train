@@ -433,7 +433,7 @@ def extract_knowledge(self, prev: dict, session_id: str, run_id: str) -> dict:
                     session_id=uuid.UUID(session_id),
                     topic=record.topic,
                     facts=record.facts,
-                    source_turn_id=row.id,
+                    source_turn_id=None,
                 )
                 db.add(kr)
                 knowledge_records.append(
