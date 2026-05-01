@@ -171,7 +171,7 @@ def enqueue_phase2_pipeline(self, session_id: str) -> None:
         run_id = str(run.id)
         _update_session_state(session_id, "TRAINING", db)
 
-    training_started(session_id, session_id, "pending")
+    training_started(run_id, session_id, "pending")
 
     # Phase 2: Build dataset → Train → Evaluate → Deploy
     (
