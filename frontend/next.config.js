@@ -5,10 +5,15 @@ const nextConfig = {
   output: "standalone",
   // Allow cross-origin requests to the backend in development
   async rewrites() {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (!apiUrl) {
+      console.warn("NEXT_PUBLIC_API_URL not set — rewrites disabled.");
+      return [];
+    }
     return [
       {
         source: "/api/:path*",
-        destination: `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/:path*`,
+        destination: `${apiUrl}/:path*`,
       },
     ];
   },

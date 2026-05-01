@@ -6,6 +6,10 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 FROM base AS builder
+ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_MODEL_SERVER_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_MODEL_SERVER_URL=${NEXT_PUBLIC_MODEL_SERVER_URL}
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
