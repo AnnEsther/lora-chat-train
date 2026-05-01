@@ -928,7 +928,7 @@ export default function ChatPage() {
                 ))}
               </div>
             </div>
-            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state) && (
+            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED", "VALIDATING"].includes(session.state) && (
               <button
                 onClick={openQaReview}
                 className="text-xs px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white transition-colors"
