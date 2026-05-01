@@ -98,6 +98,36 @@ class HFTrainingLauncher:
             )
             resp.raise_for_status()
             return f"local_{run_id}"
+        else:
+            # Submit to HuggingFace training endpoint
+            run_id = config.get("run_id", "unknown")
+            payload = {
+                "run_id": run_id,
+                "dataset_s3_path": config.get("dataset_s3_path", ""),
+                "base_model": config.get("base_model", os.environ.get("BASE_MODEL", "")),
+                "lora_r": config.get("lora_r", 16),
+                "lora_alpha": config.get("lora_alpha", 32),
+                "lora_dropout": config.get("lora_dropout", 0.05),
+                "epochs": config.get("epochs", 3),
+                "batch_size": config.get("batch_size", 4),
+                "learning_rate": config.get("learning_rate", 2e-4),
+            }
+            try:
+                resp = requests.post(
+                    HF_TRAINING_ENDPOINT,
+                    headers=self.headers,
+                    json=payload,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                job_id = data.get("id") or data.get("job_id") or run_id
+                logger.info("hf_job_submitted", extra={"job_id": job_id, "run_id": run_id})
+                return job_id
+            except requests.RequestException as exc:
+                logger.error("hf_submit_error", extra={"error": str(exc)})
+                # Fall back to treating run_id as job_id for polling
+                return f"local_{run_id}"            
 
     def poll(self, hf_job_id: str) -> Literal["running", "succeeded", "failed"]:
         """Returns one of: running | succeeded | failed."""
