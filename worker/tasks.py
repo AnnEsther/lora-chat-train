@@ -111,7 +111,7 @@ def enqueue_training_pipeline(self, session_id: str) -> None:
     (
         extract_candidates.s(None, session_id, run_id)
         | curate_candidates.s(session_id, run_id)
-        | build_dataset.s(session_id, run_id)
+        | build_dataset.s({"sufficient": True}, session_id, run_id)
         | launch_training.s(session_id, run_id)
         | poll_training.s(session_id, run_id)
         | run_evaluation.s(session_id, run_id)
@@ -171,11 +171,11 @@ def enqueue_phase2_pipeline(self, session_id: str) -> None:
         run_id = str(run.id)
         _update_session_state(session_id, "TRAINING", db)
 
-    training_started(session_id, session_id, "pending")
+    training_started(run_id, session_id, "pending")
 
     # Phase 2: Build dataset → Train → Evaluate → Deploy
     (
-        build_dataset.s(session_id, run_id)
+        build_dataset.s({"sufficient": True}, session_id, run_id)
         | launch_training.s(session_id, run_id)
         | poll_training.s(session_id, run_id)
         | run_evaluation.s(session_id, run_id)
