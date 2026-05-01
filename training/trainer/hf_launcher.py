@@ -99,6 +99,7 @@ class HFTrainingLauncher:
             resp.raise_for_status()
             return f"local_{run_id}"
         else:
+            import os
             # Submit to HuggingFace training endpoint
             run_id = config.get("run_id", "unknown")
             payload = {
