@@ -530,24 +530,27 @@ export default function ChatPage() {
   }, [messages]);
 
   // ── QA Review functions ──
-  const fetchQaItems = async () => {
+  const fetchQaItems = async (retries = 5, delayMs = 1500) => {
     if (!session) return;
     setQaLoading(true);
-    console.log("Fetching QA items for session:", session.id);
-    try {
-      const resp = await fetch(`${API_URL}/sessions/${session.id}/qa`);
-      console.log("QA response:", resp.status, resp.ok);
-      if (resp.ok) {
-        const data = await resp.json();
-        console.log("QA data:", data);
-        setQaItems(data);
-        setQaCurrentIndex(0);
-      } else {
-        const err = await resp.text();
-        console.error("QA fetch error:", err);
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const resp = await fetch(`${API_URL}/sessions/${session.id}/qa`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.length > 0) {
+            setQaItems(data);
+            setQaCurrentIndex(0);
+            setQaLoading(false);
+            return;
+          }
+        }
+      } catch (e) {
+        console.error("QA fetch error:", e);
       }
-    } catch (e) {
-      console.error("QA fetch catch:", e);
+      if (attempt < retries - 1) {
+        await new Promise((res) => setTimeout(res, delayMs));
+      }
     }
     setQaLoading(false);
   };

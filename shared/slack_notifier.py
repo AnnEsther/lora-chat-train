@@ -152,17 +152,6 @@ def session_sleeping(session_id: str) -> None:
     )
 
 
-def extraction_started(session_id: str) -> None:
-    send(
-        SlackEvent(
-            stage="extraction_started",
-            status="info",
-            summary="Extracting training candidates from transcript.",
-            session_id=session_id,
-        )
-    )
-
-
 def extraction_completed(session_id: str, count: int, s3_path: str) -> None:
     send(
         SlackEvent(
@@ -176,17 +165,6 @@ def extraction_completed(session_id: str, count: int, s3_path: str) -> None:
     )
 
 
-def curation_started(session_id: str) -> None:
-    send(
-        SlackEvent(
-            stage="curation_started",
-            status="info",
-            summary="Scoring and filtering candidates.",
-            session_id=session_id,
-        )
-    )
-
-
 def curation_completed(session_id: str, kept: int, total: int, s3_path: str) -> None:
     send(
         SlackEvent(
@@ -196,6 +174,42 @@ def curation_completed(session_id: str, kept: int, total: int, s3_path: str) -> 
             session_id=session_id,
             s3_path=s3_path,
             extra={"kept": kept, "total": total},
+        )
+    )
+
+
+def knowledge_extracted(session_id: str, topic_count: int, fact_count: int) -> None:
+    send(
+        SlackEvent(
+            stage="knowledge_extracted",
+            status="info",
+            summary=f"Extracted {fact_count} facts across {topic_count} topics.",
+            session_id=session_id,
+            extra={"topics": topic_count, "facts": fact_count},
+        )
+    )
+
+
+def qa_synthesized(session_id: str, qa_count: int) -> None:
+    send(
+        SlackEvent(
+            stage="qa_synthesized",
+            status="info",
+            summary=f"Synthesized {qa_count} Q&A pairs from knowledge facts.",
+            session_id=session_id,
+            extra={"qa_pairs": qa_count},
+        )
+    )
+
+
+def training_data_ready(session_id: str, qa_count: int, validated_count: int) -> None:
+    send(
+        SlackEvent(
+            stage="training_data_ready",
+            status="ok",
+            summary=f"Training data ready for review — {validated_count}/{qa_count} Q&A pairs auto-validated.",
+            session_id=session_id,
+            extra={"total_qa": qa_count, "auto_validated": validated_count},
         )
     )
 

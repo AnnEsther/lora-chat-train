@@ -90,10 +90,8 @@ def _set_failure_reason(session_id: str, reason: str, db: DBSession) -> None:
 def enqueue_training_pipeline(self, session_id: str) -> None:
     """Legacy: Full pipeline (for backward compatibility)."""
     from backend.models import TrainingRun
-    from shared.slack_notifier import extraction_started
 
     logger.info("pipeline_start", extra={"session_id": session_id})
-    extraction_started(session_id)
 
     with _db() as db:
         run = TrainingRun(
@@ -123,10 +121,8 @@ def enqueue_training_pipeline(self, session_id: str) -> None:
 def enqueue_phase1_pipeline(self, session_id: str) -> None:
     """Phase 1: Extract candidates, curate, extract knowledge, synthesize QA, validate."""
     from backend.models import TrainingRun
-    from shared.slack_notifier import extraction_started
 
     logger.info("phase1_start", extra={"session_id": session_id})
-    extraction_started(session_id)
 
     with _db() as db:
         run = TrainingRun(
@@ -242,9 +238,7 @@ def curate_candidates(self, prev: dict, session_id: str, run_id: str) -> dict:
     """Score and filter candidates. Persist scores to DB."""
     from training.curator.curator import Curator
     from shared.s3_uploader import upload_curated
-    from shared.slack_notifier import curation_started, curation_completed
-
-    curation_started(session_id)
+    from shared.slack_notifier import curation_completed
 
     with _db() as db:
         from backend.models import TrainingCandidate
@@ -454,6 +448,14 @@ def extract_knowledge(self, prev: dict, session_id: str, run_id: str) -> dict:
         },
     )
 
+    from shared.slack_notifier import knowledge_extracted
+
+    knowledge_extracted(
+        session_id,
+        topic_count=len(set(r.topic for r in knowledge_records)),
+        fact_count=len(knowledge_records),
+    )
+
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -534,7 +536,7 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
         logger.warning(f"Synthesis failed, using fallback: {e}")
         # Fallback: use curated candidates directly
         with _db() as db:
-            from backend.models import TrainingCandidate, SynthesizedQA
+            from backend.models import TrainingCandidate
 
             rows = (
                 db.execute(
@@ -546,33 +548,23 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
                 .scalars()
                 .all()
             )
-            qa_pairs = []
-            for r in rows:
-                user_text = " ".join(
-                    t["content"]
-                    for t in (r.conversation or [])
-                    if t.get("role") == "user"
-                )
-                assistant_text = " ".join(
-                    t["content"]
-                    for t in (r.conversation or [])
-                    if t.get("role") == "assistant"
-                )
-                sq = SynthesizedQA(
-                    id=uuid.uuid4(),
-                    session_id=uuid.UUID(session_id),
-                    question=user_text,
-                    answer=assistant_text,
-                )
-                db.add(sq)
-                qa_pairs.append(
-                    type(
-                        "obj",
-                        (object,),
-                        {"question": user_text, "answer": assistant_text},
-                    )()
-                )
-            db.commit()
+        qa_pairs = []
+        for r in rows:
+            user_text = " ".join(
+                t["content"] for t in (r.conversation or []) if t.get("role") == "user"
+            )
+            assistant_text = " ".join(
+                t["content"]
+                for t in (r.conversation or [])
+                if t.get("role") == "assistant"
+            )
+            qa_pairs.append(
+                type(
+                    "obj",
+                    (object,),
+                    {"question": user_text, "answer": assistant_text},
+                )()
+            )
 
     with _db() as db:
         from backend.models import SynthesizedQA
@@ -596,6 +588,10 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
         },
     )
 
+    from shared.slack_notifier import qa_synthesized
+
+    qa_synthesized(session_id, qa_count=len(qa_pairs))
+
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -607,6 +603,10 @@ def synthesize_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
 def validate_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
     """Validate synthesized Q&A pairs."""
     from training.knowledge.validator import QAValidator
+
+    validator = QAValidator()
+    validated_count = 0
+    needs_review_count = 0
 
     with _db() as db:
         from backend.models import SynthesizedQA
@@ -621,25 +621,21 @@ def validate_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
             .all()
         )
 
-    validator = QAValidator()
-    validated_count = 0
-    needs_review_count = 0
+        for qa in qa_items:
+            result = validator.validate(qa.question, qa.answer)
 
-    for qa in qa_items:
-        result = validator.validate(qa.question, qa.answer)
+            if result.valid:
+                qa.validated = True
+                qa.validation_notes = result.notes
+                validated_count += 1
+            else:
+                qa.retry_count += 1
+                qa.validation_notes = result.notes
 
-        if result.valid:
-            qa.validated = True
-            qa.validation_notes = result.notes
-            validated_count += 1
-        else:
-            qa.retry_count += 1
-            qa.validation_notes = result.notes
+                if qa.retry_count >= 3:
+                    needs_review_count += 1
 
-            if qa.retry_count >= 3:
-                needs_review_count += 1
-
-    db.commit()
+        db.commit()
 
     logger.info(
         "qa_validated",
@@ -649,7 +645,15 @@ def validate_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
             "needs_review": needs_review_count,
         },
     )
-    
+
+    from shared.slack_notifier import training_data_ready
+
+    training_data_ready(
+        session_id,
+        qa_count=len(qa_items),
+        validated_count=validated_count,
+    )
+
     with _db() as db:
         _update_session_state(session_id, "VALIDATING", db)
 
