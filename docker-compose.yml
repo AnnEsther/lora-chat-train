@@ -68,7 +68,7 @@ services:
   model_server:
     build:
       context: ./backend
-      dockerfile: Dockerfile.model
+      dockerfile: backend/Dockerfile.model
     <<: *common-env
     ports:
       - "8001:8001"
