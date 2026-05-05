@@ -220,3 +220,100 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
             )
 
     logger.info("train_local_start", extra={"dataset": str(dataset_path), "config": config.get("run_id")})
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from trl import SFTTrainer, SFTConfig
+    from datasets import load_dataset
+
+    run_id = config.get("run_id", "unknown")
+    base_model = config.get("base_model", os.environ.get("BASE_MODEL", "meta-llama/Llama-3.2-1B-Instruct"))
+    lora_cfg = config.get("lora", {})
+    train_cfg = config.get("training", {})
+
+    output_dir = Path(train_cfg.get("output_dir", f"/tmp/lora_run_{run_id}"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load tokenizer ────────────────────────────────────────────────────────
+    logger.info("loading_tokenizer", extra={"model": base_model})
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model,
+        token=os.environ.get("HF_TOKEN", ""),
+        trust_remote_code=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # ── Load model with 4-bit quantization ───────────────────────────────────
+    logger.info("loading_model", extra={"model": base_model})
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        quantization_config=bnb_config,
+        device_map="auto",
+        token=os.environ.get("HF_TOKEN", ""),
+        trust_remote_code=True,
+    )
+    model = prepare_model_for_kbit_training(model)
+
+    # ── Apply LoRA ────────────────────────────────────────────────────────────
+    lora_config = LoraConfig(
+        r=lora_cfg.get("r", int(os.environ.get("LORA_R", 16))),
+        lora_alpha=lora_cfg.get("lora_alpha", int(os.environ.get("LORA_ALPHA", 32))),
+        lora_dropout=lora_cfg.get("lora_dropout", float(os.environ.get("LORA_DROPOUT", 0.05))),
+        target_modules=lora_cfg.get("target_modules", os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(",")),
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
+
+    # ── Load dataset ──────────────────────────────────────────────────────────
+    logger.info("loading_dataset", extra={"path": str(dataset_path)})
+    dataset = load_dataset("json", data_files=str(dataset_path), split="train")
+
+    # ── Train ─────────────────────────────────────────────────────────────────
+    logger.info("training_start", extra={"samples": len(dataset), "epochs": train_cfg.get("num_train_epochs", 3)})
+
+    sft_config = SFTConfig(
+        output_dir=str(output_dir),
+        num_train_epochs=train_cfg.get("num_train_epochs", int(os.environ.get("TRAIN_EPOCHS", 3))),
+        per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", int(os.environ.get("TRAIN_BATCH_SIZE", 4))),
+        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", int(os.environ.get("TRAIN_GRAD_ACCUM", 4))),
+        learning_rate=train_cfg.get("learning_rate", float(os.environ.get("TRAIN_LR", 2e-4))),
+        max_seq_length=train_cfg.get("max_seq_length", int(os.environ.get("MAX_SEQ_LENGTH", 512))),
+        lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
+        warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
+        bf16=True,
+        fp16=False,
+        optim="paged_adamw_8bit",
+        logging_steps=10,
+        save_steps=50,
+        save_total_limit=1,
+        report_to="none",
+    )
+
+    trainer = SFTTrainer(
+        model=model,
+        args=sft_config,
+        train_dataset=dataset,
+        tokenizer=tokenizer,
+    )
+
+    trainer.train()
+
+    # ── Save adapter ──────────────────────────────────────────────────────────
+    logger.info("saving_adapter", extra={"output_dir": str(output_dir)})
+    trainer.model.save_pretrained(str(output_dir))
+    tokenizer.save_pretrained(str(output_dir))
+
+    if not output_dir.exists():
+        raise RuntimeError(f"Training completed but output_dir missing: {output_dir}")
+
+    logger.info("train_local_complete", extra={"output_dir": str(output_dir)})
+    return output_dir
