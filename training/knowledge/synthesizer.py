@@ -14,7 +14,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
-BATCH_SIZE = int(os.environ.get("QA_BATCH_SIZE", "20"))  # facts per model call
+BATCH_SIZE = int(os.environ.get("QA_BATCH_SIZE", "5"))  # facts per model call
 MAX_RETRIES = 2
 CALL_TIMEOUT = int(os.environ.get("QA_SYNTHESIS_TIMEOUT", "60"))
 
@@ -100,31 +100,21 @@ class QASynthesizer:
 
         facts_block = "\n\n".join(fact_lines)
 
-        prompt = f"""{system_prompt + chr(10) if system_prompt else ""}You are generating fine-tuning training data. 
-
-Context: A student (AI model) is learning from a teacher (human user). The student asks questions and the teacher provides knowledge.
-
-Your job: For each exchange below, generate ONE training example with:
-- "question": a natural question the student would ask to draw out this knowledge
-- "answer": the teacher's knowledge response (use the teacher's actual words where possible)
-
-The goal is to train the model to ask good questions that help the teacher share their knowledge.
+         # Tight, unambiguous prompt — Llama responds well to this format
+        prompt = f"""Generate training data for a student-teacher AI conversation.
+The student (AI) asks questions. The teacher (human) shares knowledge.
 
 {facts_block}
 
-Respond ONLY with a JSON array of exactly {len(batch)} objects:
+For each FACT above, write one question the student would ask and the teacher's answer.
+Output ONLY valid JSON, nothing else:
+
 [
-  {{"question": "question student asks", "answer": "teacher knowledge response"}},
-  ...
-]
+  {{"question": "...", "answer": "..."}},
+  {{"question": "...", "answer": "..."}}
+]"""
 
-Rules:
-- Questions must be specific to the actual content, not generic
-- Answers must come from the teacher's knowledge, not be invented
-- Questions should sound like a curious student asking to learn more
-- No preamble, just the JSON array"""
-
-        response_text = self._call_model(prompt, max_tokens=min(150 * len(batch), 3000))
+        response_text = self._call_model(prompt, max_tokens=200 * len(batch))
         return self._parse_batch_response(response_text, batch)
 
     def _call_model(self, prompt: str, max_tokens: int = 1000) -> str:
@@ -147,27 +137,51 @@ Rules:
 
         raise Exception(f"Model server failed after {MAX_RETRIES} attempts")
 
-    def _parse_batch_response(
-        self,
-        response: str,
-        batch: list[tuple[dict, str]],
-    ) -> list[SynthesizedQA]:
+    def _parse_batch_response( self, response: str, batch: list[tuple[dict, str]], ) -> list[SynthesizedQA]:
         """Parse the JSON array response, fall back per-item if needed."""
+        
+        # Log first 300 chars so we can see what the model returned
+        logger.info("model_response_preview", extra={"preview": response[:300]})
+    
         # Strip markdown fences if model wrapped output
         clean = re.sub(r"```(?:json)?|```", "", response).strip()
 
-        # Find the JSON array (model sometimes adds preamble text)
-        array_match = re.search(r"\[.*\]", clean, re.DOTALL)
-        if not array_match:
-            logger.warning("No JSON array found in response, using fallback")
-            return self._fallback_batch(batch)
-
         try:
-            items = json.loads(array_match.group())
+            items = json.loads(clean)
+            if isinstance(items, list):
+                return self._items_to_qa(items, batch)
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parse failed: {e}, using fallback")
-            return self._fallback_batch(batch)
+            pass
+        
+        # Find the JSON array (model sometimes adds preamble text)
+        array_match = re.search(r"\[.*\]", clean, re.DOTALL)
+        if array_match:
+            try :
+                items = json.loads(array_match.group())
+                if isinstance(items, list):
+                    return self._items_to_qa(items, batch)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parse failed: {e}, using fallback")
+                pass
+        
+        objects = re.findall(
+            r'\{[^{}]*"question"\s*:\s*"[^"]+?"[^{}]*"answer"\s*:\s*"[^"]+?"[^{}]*\}',
+            clean,
+            re.DOTALL,
+        )
+        if objects:
+            try:
+                items = [json.loads(o) for o in objects]
+                return self._items_to_qa(items, batch)
+            except json.JSONDecodeError:
+                pass
 
+        logger.warning("all_json_parse_attempts_failed", extra={"preview": clean[:300]})
+        return self._fallback_batch(batch)
+    
+    def _items_to_qa(self, items: list[dict[str, Any]], batch: list[tuple[dict, str]]) -> list[SynthesizedQA]:
+        """Convert parsed JSON items to SynthesizedQA, falling back per missing item."""
         qa_pairs = []
         for i, (fact, topic) in enumerate(batch):
             if i < len(items):
@@ -177,9 +191,7 @@ Rules:
                 if q and a and len(q) > 5 and len(a) > 5:
                     qa_pairs.append(SynthesizedQA(question=q, answer=a, source_fact=fact))
                     continue
-            # Item missing or malformed — use fallback for just this one
             qa_pairs.extend(self._fallback_single(fact, topic))
-
         return qa_pairs
 
     def _fallback_batch(self, batch: list[tuple[dict, str]]) -> list[SynthesizedQA]:
