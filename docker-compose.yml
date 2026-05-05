@@ -62,8 +62,16 @@ services:
       - ./training:/app/training
       - ./outputs:/app/outputs
       - ./backend:/app/backend
+      - adapter_store:/adapters
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: "nvidia"
+              count: 1
+              capabilities: ["gpu"]
     restart: unless-stopped
-    command: celery -A tasks worker --loglevel=info --concurrency=2
+    command: celery -A tasks worker --loglevel=info --concurrency=1
   # ── Model server ────────────────────────────────────────────────────────────
   model_server:
     build:
