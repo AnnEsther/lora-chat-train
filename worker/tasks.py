@@ -452,7 +452,7 @@ def extract_knowledge(self, prev: dict, session_id: str, run_id: str) -> dict:
 
     knowledge_extracted(
         session_id,
-        topic_count=len(set(r.topic for r in knowledge_records)),
+        topic_count=len(set(r["topic"] for r in knowledge_records)),
         fact_count=len(knowledge_records),
     )
 
