@@ -72,66 +72,61 @@ class KnowledgeNormalizer:
         logger.debug("knowledge_records_created", extra={"count": len(records)})
         return records
 
-    def _extract_facts(
-        self,
-        user_turn: str,
-        assistant_turn: str,
-        topic: ExtractedTopic,
-    ) -> list[dict[str, Any]]:
-        """Extract structured facts based on topic and intent."""
+    def _extract_facts( self, user_turn: str, assistant_turn: str, topic: ExtractedTopic, ) -> list[dict[str, Any]]:
+        """
+        Extract facts always anchored to:
+        - user_turn  = the knowledge/answer (teacher explaining)
+        - assistant_turn = the question that prompted it (student asking)
+        """
         facts = []
 
-        if topic.intent == "explanation":
-            facts.extend(self._extract_explanatory_facts(assistant_turn, topic))
-        elif topic.intent == "question":
-            facts.extend(self._extract_qa_facts(user_turn, assistant_turn, topic))
-        elif topic.intent == "task":
-            facts.extend(self._extract_task_facts(user_turn, assistant_turn, topic))
-        else:
-            facts.extend(
-                self._extract_conversation_facts(user_turn, assistant_turn, topic)
-            )
-
-        return facts
-
-    def _extract_explanatory_facts(
-        self,
-        assistant_turn: str,
-        topic: ExtractedTopic,
-    ) -> list[dict[str, Any]]:
-        """Extract facts from explanatory content."""
-        facts = []
-
-        # Extract key statements (sentences)
-        sentences = re.split(r"[.!?]\s+", assistant_turn)
+        # Every exchange is a qa_pair: student asked, teacher answered
+        if user_turn.strip() and assistant_turn.strip():
+            facts.append({
+                "type": "qa_pair",
+                "question": assistant_turn.strip(),  # LLM asked this
+                "answer": user_turn.strip(),          # User taught this
+                "topic": topic.topic,
+            })
+            
+        # Extract individual knowledge sentences from the USER's response
+        # These become additional training examples (model asks about them)
+        sentences = re.split(r"[.!?]\s+", user_turn)
         for sentence in sentences:
             sentence = sentence.strip()
-            if len(sentence) > 20:
-                facts.append(
-                    {
-                        "type": "fact",
-                        "content": sentence,
-                        "topic": topic.topic,
-                        "keywords": topic.keywords,
-                    }
-                )
-
-        # Extract definitions (things that define/explain)
-        definitions = re.findall(
-            r"(?:is a|are |refers to |means |defined as)\s*([^.!?]+)",
-            assistant_turn,
-            re.IGNORECASE,
-        )
-        for defn in definitions[:3]:
-            facts.append(
-                {
-                    "type": "definition",
-                    "content": defn.strip(),
+            if len(sentence) > 30:
+                facts.append({
+                    "type": "fact",
+                    "content": sentence,          # user's knowledge
+                    "student_question": assistant_turn.strip(),  # what the LLM asked
                     "topic": topic.topic,
-                }
-            )
+                    "keywords": topic.keywords,
+                })
 
-        return facts[:5]  # Limit to 5 facts per topic
+        # Extract code blocks from the USER's turn (user may paste code to teach)
+        code_blocks = re.findall(r"```[\s\S]*?```", user_turn)
+        for code in code_blocks[:2]:
+            facts.append({
+                "type": "code_example",
+                "content": code,
+                "language": self._detect_language(code),
+                "student_question": assistant_turn.strip(),
+                "topic": topic.topic,
+            })
+
+        return facts[:6]
+
+
+    def _extract_explanatory_facts( self, assistant_turn: str, topic: ExtractedTopic, ) -> list[dict[str, Any]]:
+        """
+        The assistant is the STUDENT asking questions.
+        The user is the TEACHER providing knowledge.
+        Facts come from the USER (teacher) turn — assistant_turn is just the question.
+        This method receives assistant_turn for legacy signature compat but we don't use it here.
+        """
+        # This method is called when intent == "explanation" — meaning the user explained something.
+        # The actual content is in user_turn, passed via _extract_facts below.
+        return []  # handled in _extract_facts directly
 
     def _extract_qa_facts(
         self,
@@ -237,27 +232,16 @@ class KnowledgeNormalizer:
 
         return facts[:3]
 
-    def _extract_general_facts(
-        self,
-        user_turn: str,
-        assistant_turn: str,
-    ) -> list[dict[str, Any]]:
-        """Extract general facts when no specific topic found."""
-        facts = []
-
-        sentences = re.split(r"[.!?]\s+", assistant_turn)
-        for sentence in sentences[:3]:
-            sentence = sentence.strip()
-            if len(sentence) > 20:
-                facts.append(
-                    {
-                        "type": "fact",
-                        "content": sentence,
-                        "topic": "general",
-                    }
-                )
-
-        return facts[:3]
+    def _extract_general_facts( self, user_turn: str, assistant_turn: str, ) -> list[dict[str, Any]]:
+        """Fallback: preserve the full exchange with correct roles."""
+        if not user_turn.strip():
+            return []
+        return [{
+            "type": "qa_pair",
+            "question": assistant_turn.strip(),  # LLM asked
+            "answer": user_turn.strip(),          # User answered/taught
+            "topic": "general",
+        }]
 
     def _detect_language(self, code_block: str) -> str:
         """Detect programming language from code block."""
