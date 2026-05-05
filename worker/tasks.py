@@ -370,6 +370,7 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
         "run_id": run_id,
         "dataset_id": dataset_id,
         "s3_path": dataset_s3,
+        "local_path": "",  # train_local will download from S3 if empty
     }
 
 
@@ -730,7 +731,7 @@ def merge_corpus(self, prev: dict, session_id: str, run_id: str) -> dict:
 
 @app.task(name="tasks.launch_training", bind=True)
 def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
-    """Launch HuggingFace training job."""
+    """Launch training — locally on GPU if no HF_TRAINING_ENDPOINT set."""
     if not prev.get("sufficient", True):
         logger.info(
             "skipping_training_insufficient_data", extra={"session_id": session_id}
@@ -755,26 +756,78 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
     config_s3 = upload_training_config(run_id, config)
     artifact_uploaded(run_id, "training_config", config_s3)
 
-    hf_job_id = launcher.launch(config)
-
+    HF_TRAINING_ENDPOINT = os.environ.get("HF_TRAINING_ENDPOINT", "")
+    if HF_TRAINING_ENDPOINT:
+        # ── Remote HF endpoint ────────────────────────────────────────────────
+        hf_job_id = launcher.launch(config)
+        with _db() as db:
+            _update_run_status(
+                run_id, "RUNNING", db,
+                hf_job_id=hf_job_id,
+                config=config,
+                started_at=datetime.now(timezone.utc),
+            )
+        training_started(run_id, session_id, hf_job_id)
+        logger.info("training_launched", extra={"run_id": run_id, "hf_job_id": hf_job_id})
+        return {"session_id": session_id, "run_id": run_id, "hf_job_id": hf_job_id}
+    
+    # ── Local training on T4 GPU ──────────────────────────────────────────────
+    logger.info("local_training_start", extra={"run_id": run_id, "session_id": session_id})
+    training_started(run_id, session_id, f"local_{run_id}")
+    
+    from training.trainer.hf_launcher import train_local
+    from shared.s3_uploader import upload_adapter
+    from shared.slack_notifier import training_succeeded
+    
     with _db() as db:
         _update_run_status(
-            run_id,
-            "RUNNING",
-            db,
-            hf_job_id=hf_job_id,
+            run_id,  "RUNNING", db,
+            hf_job_id=f"local_{run_id}",
             config=config,
             started_at=datetime.now(timezone.utc),
         )
+        
+    try:
+        output_dir = train_local(config, dataset_local)
+    except Exception as exc:
+        logger.error("local_training_failed", extra={"run_id": run_id, "error": str(exc)})
+        with _db() as db:
+            _update_run_status(run_id, "FAILED", db, finished_at=datetime.now(timezone.utc))
+            _update_session_state(session_id, "FAILED", db)
+            _set_failure_reason(session_id, f"Local training failed: {exc}", db)
+        raise
+    
+    adapter_s3 = upload_adapter(run_id, output_dir)
+    artifact_uploaded(run_id, "adapter", adapter_s3)
 
-    training_started(run_id, session_id, hf_job_id)
-    logger.info("training_launched", extra={"run_id": run_id, "hf_job_id": hf_job_id})
-    return {"session_id": session_id, "run_id": run_id, "hf_job_id": hf_job_id}
+    with _db() as db:
+        _update_run_status(
+            run_id, "SUCCEEDED", db,
+            logs_s3_path=None,
+            artifact_s3_path=adapter_s3,
+            finished_at=datetime.now(timezone.utc),
+        )
+        _update_session_state(session_id, "EVALUATING", db)
 
+    training_succeeded(run_id, adapter_s3)
+    logger.info("local_training_complete", extra={"run_id": run_id, "output": output_dir})
+
+    return {
+        "session_id": session_id,
+        "run_id": run_id,
+        "hf_job_id": f"local_{run_id}",
+        "local": True,
+        "artifact_dir": str(output_dir),
+    }
 
 @app.task(name="tasks.poll_training", bind=True, max_retries=60, default_retry_delay=60)
 def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
-    """Poll HuggingFace until training job completes. Retries every 60s for up to 1h."""
+    """Poll HuggingFace until training job completes. Skipped for local training."""
+    # Local training already completed inside launch_training — skip polling
+    if prev.get("local"):
+        logger.info("skipping_poll_local_training", extra={"run_id": run_id})
+        return prev
+
     if not prev.get("sufficient", True):
         logger.info(
             "skipping_poll_training_insufficient_data", extra={"session_id": session_id}
@@ -836,7 +889,6 @@ def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         "run_id": run_id,
         "artifact_dir": str(adapter_dir),
     }
-
 
 @app.task(name="tasks.run_evaluation", bind=True)
 def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:

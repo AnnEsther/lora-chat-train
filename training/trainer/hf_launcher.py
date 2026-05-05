@@ -197,99 +197,26 @@ class HFTrainingLauncher:
 # ── Local SFTTrainer (run inside container or RunPod) ─────────────────────────
 
 
-def train_local(config: dict, dataset_path: Path) -> Path:
-    """
-    Run LoRA SFT training locally using transformers + peft + trl.
-    This is the direct refactor of train.py from the original EndToEndLoRA repo.
+def train_local(config: dict, dataset_path: str | Path = "") -> Path:
+    """Run LoRA SFT training locally on GPU. Downloads dataset from S3 if no local path."""
+    import tempfile
+    import boto3
 
-    Returns path to the saved adapter.
-    """
-    import torch
-    from datasets import load_dataset
-    from peft import LoraConfig, get_peft_model, TaskType
-    from transformers import (
-        AutoModelForCausalLM,
-        AutoTokenizer,
-        TrainingArguments,
-        BitsAndBytesConfig,
-    )
-    from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+    dataset_path = Path(dataset_path) if dataset_path else Path("")
 
-    run_id = config["run_id"]
-    lora_cfg = config["lora"]
-    train_cfg = config["training"]
-    output_dir = Path(train_cfg["output_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # ── Download from S3 if no valid local file ───────────────────────────────
+    if not dataset_path or not dataset_path.exists():
+        s3_uri = config.get("dataset_s3_path", "")
+        if s3_uri and s3_uri.startswith("s3://"):
+            parts = s3_uri[5:].split("/", 1)
+            bucket, key = parts[0], parts[1]
+            tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+            logger.info("downloading_dataset_from_s3", extra={"uri": s3_uri, "local": tmp.name})
+            boto3.client("s3").download_file(bucket, key, tmp.name)
+            dataset_path = Path(tmp.name)
+        else:
+            raise ValueError(
+                f"No valid dataset: local='{dataset_path}', s3='{s3_uri}'"
+            )
 
-    logger.info(
-        "local_training_start",
-        extra={"run_id": run_id, "base_model": config["base_model"]},
-    )
-
-    # 4-bit quantisation for memory efficiency on smaller GPUs
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        config["base_model"],
-        token=HF_TOKEN,
-        trust_remote_code=True,
-    )
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-
-    model = AutoModelForCausalLM.from_pretrained(
-        config["base_model"],
-        quantization_config=bnb_config,
-        device_map="auto",
-        token=HF_TOKEN,
-        trust_remote_code=True,
-    )
-    model.config.use_cache = False
-
-    lora_config = LoraConfig(
-        r=lora_cfg["r"],
-        lora_alpha=lora_cfg["lora_alpha"],
-        lora_dropout=lora_cfg["lora_dropout"],
-        target_modules=lora_cfg["target_modules"],
-        bias=lora_cfg["bias"],
-        task_type=TaskType.CAUSAL_LM,
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-
-    dataset = load_dataset("json", data_files=str(dataset_path), split="train")
-
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        num_train_epochs=train_cfg["num_train_epochs"],
-        per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
-        gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
-        learning_rate=train_cfg["learning_rate"],
-        lr_scheduler_type=train_cfg["lr_scheduler_type"],
-        warmup_ratio=train_cfg["warmup_ratio"],
-        fp16=train_cfg.get("fp16", True),
-        optim=train_cfg.get("optim", "paged_adamw_8bit"),
-        logging_steps=train_cfg.get("logging_steps", 10),
-        save_steps=train_cfg.get("save_steps", 50),
-        report_to="none",  # avoid wandb dependency
-    )
-
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        tokenizer=tokenizer,
-        max_seq_length=train_cfg.get("max_seq_length", 512),
-    )
-
-    trainer.train()
-    trainer.save_model(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
-
-    logger.info("local_training_done", extra={"output_dir": str(output_dir)})
-    return output_dir
+    logger.info("train_local_start", extra={"dataset": str(dataset_path), "config": config.get("run_id")})
