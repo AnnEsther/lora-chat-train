@@ -16,4 +16,4 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1"]
+CMD ["celery", "-A", "tasks", "worker", "--loglevel=info", "--concurrency=1", "--pool=prefork"]

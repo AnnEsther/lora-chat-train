@@ -5,7 +5,8 @@
 
 celery==5.4.0
 redis==5.1.1
-gevent
+kombu==5.3.4
+gevent==24.2.1
 
 # Database
 sqlalchemy==2.0.35
