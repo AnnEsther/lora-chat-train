@@ -41,6 +41,9 @@ app = Celery(
 )
 app.conf.task_serializer = "json"
 app.conf.result_serializer = "json"
+app.conf.task_acks_late = True          # only ack after task completes
+app.conf.task_reject_on_worker_lost = True  # requeue if worker dies mid-task
+app.conf.worker_prefetch_multiplier = 1     # don't prefetch, one task at a time
 
 # Sync engine for Celery tasks (Celery runs in a sync context)
 engine = create_engine(DATABASE_URL_SYNC, pool_pre_ping=True)
