@@ -94,10 +94,10 @@ All return values are `local://{absolute_path}` URIs, so calling code treats the
   - Field rows for all optional fields that are set
 - Silently skips (no-op) if `SLACK_WEBHOOK_URL` is not configured
 
-### 25 Convenience Wrappers
+### 26 Convenience Wrappers
 Covering every named pipeline event. Call these from Celery tasks or backend code:
 
-`session_started`, `pre_sleep_warning`, `session_sleeping`, `extraction_started`, `extraction_completed`, `curation_started`, `curation_completed`, `dataset_built`, `artifact_uploaded`, `training_started`, `training_succeeded`, `training_failed`, `evaluation_started`, `evaluation_completed`, `deployment_approved`, `deployment_rejected`, `adapter_switch_succeeded`, `adapter_switch_failed`, `rollback_triggered`, `rollback_completed`, `insufficient_data_warning`
+`session_started`, `pre_sleep_warning`, `session_sleeping`, `extraction_completed`, `curation_completed`, `knowledge_extracted`, `qa_synthesized`, `training_data_ready`, `dataset_built`, `artifact_uploaded`, `training_started`, `training_succeeded`, `training_failed`, `evaluation_started`, `evaluation_completed`, `deployment_approved`, `deployment_rejected`, `adapter_switch_succeeded`, `adapter_switch_failed`, `rollback_triggered`, `rollback_completed`, `insufficient_data_warning`
 
 ### Configuration
 | Env Var | Description |
@@ -110,3 +110,4 @@ Covering every named pipeline event. Call these from Celery tasks or backend cod
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-05 | Remove extraction_started, curation_started; add knowledge_extracted, qa_synthesized, training_data_ready | opencode |

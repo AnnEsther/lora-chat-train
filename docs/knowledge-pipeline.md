@@ -28,7 +28,7 @@ The knowledge pipeline sits between curation and dataset building (Phase 1). It 
 
 - Converts raw text into typed fact records
 - Handles 6 fact types: `fact`, `definition`, `qa_pair`, `code_example`, `step`, `task`
-- Each `KnowledgeRecord` carries: `topic`, `fact_type`, `content`, `source_turn_index`
+- Each `KnowledgeRecord` carries: `topic`, `facts` (list[dict])
 
 ### 3. `QASynthesizer` — Q&A Generation
 **Input:** `list[KnowledgeRecord]`, `system_prompt`
@@ -65,8 +65,8 @@ Scores on 4 dimensions:
 - `get_stats(corpus)` — returns `{total_entries, total_facts, topics: {topic: count}}`
 
 ## Database Tables
-- `knowledge_records` — structured facts with topic, fact_type, content
-- `synthesized_qa` — Q&A pairs with `validated` flag, `retry_count`, `validation_notes`
+- `knowledge_records` — structured facts with topic, facts (JSONB), source_turn_id
+- `synthesized_qa` — Q&A pairs with `validated` flag, `edited`, `retry_count`, `validation_notes`
 - `knowledge_corpus` — cross-session merged, deduplicated knowledge base
 
 ## QA Review Modal (Frontend)
@@ -90,3 +90,4 @@ Scores on 4 dimensions:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-05 | Update KnowledgeRecord output to match corrected model (topic, facts list[dict]) | opencode |

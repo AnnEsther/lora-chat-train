@@ -131,9 +131,8 @@ Structured facts extracted from conversations.
 | `id` | UUID | PK |
 | `session_id` | UUID | FK → sessions (CASCADE DELETE) |
 | `topic` | TEXT | Topic domain |
-| `fact_type` | TEXT | `fact`, `definition`, `qa_pair`, `code_example`, `step`, `task` |
-| `content` | TEXT | |
-| `source_turn_index` | INT | |
+| `facts` | JSONB | `list[dict]` — structured fact records |
+| `source_turn_id` | UUID | FK → turns (SET NULL) |
 | `created_at` | TIMESTAMPTZ | |
 
 ### `synthesized_qa`
@@ -142,13 +141,13 @@ Model-generated Q&A pairs.
 |--------|------|-------|
 | `id` | UUID | PK |
 | `session_id` | UUID | FK → sessions (CASCADE DELETE) |
-| `knowledge_record_id` | UUID | FK → knowledge_records |
+| `knowledge_record_id` | UUID | FK → knowledge_records (SET NULL) |
 | `question` | TEXT | |
 | `answer` | TEXT | |
 | `validated` | BOOL | Human or auto-validated flag |
-| `validation_score` | FLOAT | Automated quality score |
+| `edited` | BOOL | User manually edited |
+| `retry_count` | INT | Number of validation attempts |
 | `validation_notes` | TEXT | Reason for pass/fail |
-| `retry_count` | INT | Number of re-synthesis attempts |
 | `created_at` | TIMESTAMPTZ | |
 
 ### `knowledge_corpus`
@@ -156,11 +155,9 @@ Cross-session, deduplicated knowledge base.
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | UUID | PK |
-| `session_id` | UUID | FK → sessions |
 | `topic` | TEXT | |
-| `fact_type` | TEXT | |
-| `content` | TEXT | |
-| `dedup_key` | TEXT | `(type, content[:100])` hash |
+| `facts` | JSONB | `list[dict]` — deduplicated facts |
+| `source_session_id` | UUID | FK → sessions |
 | `created_at` | TIMESTAMPTZ | |
 
 ## Schema Features
@@ -179,3 +176,4 @@ Cross-session, deduplicated knowledge base.
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-05 | Fix knowledge_records table (add topic, facts, source_turn_id), fix synthesized_qa (add edited, fix retry_count), fix knowledge_corpus (topic, facts, source_session_id) | opencode |

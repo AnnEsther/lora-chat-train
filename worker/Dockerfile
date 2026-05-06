@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
+# Remove system redis package that conflicts with pip redis
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip uninstall -y redis 2>/dev/null || true
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

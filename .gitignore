@@ -43,3 +43,4 @@ htmlcov/
 
 outputs/*
 
+lora-server.pem

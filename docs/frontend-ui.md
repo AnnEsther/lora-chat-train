@@ -73,12 +73,12 @@ interface Message {
 - Input disabled when session state is not `ACTIVE` or `PRE_SLEEP_WARNING`
 
 ## QA Review Modal
-- **Trigger:** auto-opens when `session.state === "VALIDATING"`
+- **Trigger:** auto-opens when `session.state === "VALIDATING"`; uses retry loop (5 attempts, 1.5s delay) to wait for QA data to be committed
 - **Navigation:** card-by-card with Previous/Next buttons
 - **Per-card:** view + inline-edit question and answer; see `validation_notes`; click "Mark Validated"
 - **Bulk action:** "Validate All & Start Training" → `POST /qa/validate-mark` then `POST /start-training`
 - **API calls:**
-  - `GET /sessions/{id}/qa` — load items
+  - `GET /sessions/{id}/qa` — load items (with retry logic)
   - `PUT /sessions/{id}/qa/{qa_id}` — save edits
   - `POST /sessions/{id}/qa/validate-mark` — bulk validate
   - `POST /sessions/{id}/start-training` — trigger Phase 2
@@ -130,3 +130,4 @@ Sections:
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-05 | Add retry logic to fetchQaItems (wait for QA data to be committed) | opencode |

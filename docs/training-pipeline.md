@@ -59,7 +59,8 @@ build_dataset
 ### `extract_knowledge`
 - Input: included candidates from DB
 - Runs `KnowledgeExtractor` + `KnowledgeNormalizer`
-- Persists `KnowledgeRecord` rows (topics, structured facts) to DB
+- Persists `KnowledgeRecord` rows (topic, facts as JSONB, source_turn_id) to DB
+- Sends `knowledge_extracted` Slack notification
 
 ### `synthesize_qa`
 - Input: knowledge records from DB
@@ -131,3 +132,4 @@ build_dataset
 | Date | Change | Author |
 |------|--------|--------|
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-05 | Add Slack notifications to extract_knowledge, synthesize_qa, validate_qa (knowledge_extracted, qa_synthesized, training_data_ready) | opencode |
