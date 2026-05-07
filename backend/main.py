@@ -599,7 +599,7 @@ async def list_adapters() -> dict:
     import json
     from pathlib import Path
 
-    adapter_dir = Path(__file__).parent.parent / "adapters"
+    adapter_dir = Path(os.environ.get("ADAPTER_DIR", "/adapters/current")).parent
     history_dir = adapter_dir / "history"
     current_dir = adapter_dir / "current"
 
