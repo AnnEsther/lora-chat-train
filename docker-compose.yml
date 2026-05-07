@@ -87,6 +87,13 @@ services:
       LOCAL_OUTPUT_DIR: /app/outputs
       ADAPTER_DIR: /adapters/current
       ADAPTER_HISTORY_DIR: /adapters/history
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: "nvidia"
+              count: 1
+              capabilities: ["gpu"]
     restart: unless-stopped
     command: python -m model_server.serve
   # ── Frontend ────────────────────────────────────────────────────────────────
