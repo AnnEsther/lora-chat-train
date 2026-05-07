@@ -248,6 +248,46 @@ async def health() -> dict:
         "model_loaded": _model is not None,
         "adapter": _adapter_loaded,
     }
+    
+@app.get("/adapters")
+async def list_adapters() -> dict:
+    import json
+    adapters = [{"id": "base", "version": "Base model", "path": "", "is_base": True}]
+    history_dir = ADAPTER_DIR.parent / "history"
+    try:
+        if history_dir.exists():
+            for hist_dir in sorted(history_dir.iterdir()):
+                if hist_dir.is_dir():
+                    manifest_path = hist_dir / "manifest.json"
+                    version = hist_dir.name
+                    trained_at = None
+                    if manifest_path.exists():
+                        try:
+                            manifest = json.loads(manifest_path.read_text())
+                            version = manifest.get("version", hist_dir.name)
+                            trained_at = manifest.get("trained_at")
+                        except Exception:
+                            pass
+                    adapters.append({"id": hist_dir.name, "version": version, "path": str(hist_dir), "trained_at": trained_at})
+        if ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir()):
+            manifest_path = ADAPTER_DIR / "manifest.json"
+            version = "v1 (live)"
+            trained_at = None
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                    version = manifest.get("version", "v1") + " (live)"
+                    trained_at = manifest.get("trained_at")
+                except Exception:
+                    pass
+            adapters.append({"id": "current", "version": version, "path": str(ADAPTER_DIR), "trained_at": trained_at, "is_current": True})
+    except Exception as exc:
+        logger.warning(f"adapters_list_error: {exc}")
+    return {"adapters": adapters}
+
+@app.get("/train/status")
+async def train_status() -> dict:
+    return {"status": "idle", "progress": "", "started_at": None, "finished_at": None, "vram_used_gb": None, "vram_free_gb": None}
 
 
 if __name__ == "__main__":
