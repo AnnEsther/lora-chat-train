@@ -202,10 +202,10 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     import tempfile
     import boto3
 
-    dataset_path = Path(dataset_path) if dataset_path else Path("")
+    dataset_path = Path(dataset_path) if dataset_path else None
 
     # ── Download from S3 if no valid local file ───────────────────────────────
-    if not dataset_path or not dataset_path.exists():
+    if dataset_path is None or not dataset_path.exists() or not dataset_path.is_file():
         s3_uri = config.get("dataset_s3_path", "")
         if s3_uri and s3_uri.startswith("s3://"):
             parts = s3_uri[5:].split("/", 1)
