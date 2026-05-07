@@ -76,7 +76,7 @@ services:
   model_server:
     build:
       context: ./backend
-      dockerfile: Dockerfile.model
+      dockerfile: Dockerfile.model.gpu
     <<: *common-env
     ports:
       - "8001:8001"
