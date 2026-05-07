@@ -88,7 +88,7 @@ services:
       ADAPTER_DIR: /adapters/current
       ADAPTER_HISTORY_DIR: /adapters/history
     restart: unless-stopped
-    command: python -m model_server.hf_serve
+    command: python -m model_server.serve
   # ── Frontend ────────────────────────────────────────────────────────────────
   frontend:
     build:
