@@ -595,65 +595,17 @@ async def health() -> dict:
 
 @app.get("/adapters")
 async def list_adapters() -> dict:
-    """Return list of available adapters from the file system."""
-    import json
-    from pathlib import Path
-
-    adapter_dir = Path(os.environ.get("ADAPTER_DIR", "/adapters/current")).parent
-    history_dir = adapter_dir / "history"
-    current_dir = adapter_dir / "current"
-
-    logger.info(f"adapter_dir: {adapter_dir}, exists: {adapter_dir.exists()}")
-    logger.info(f"history_dir: {history_dir}, exists: {history_dir.exists()}")
-    logger.info(f"current_dir: {current_dir}, exists: {current_dir.exists()}")
-
-    adapters = [{"id": "base", "version": "Base model", "path": "", "is_base": True}]
-
-    if history_dir.exists():
-        for hist_dir in sorted(history_dir.iterdir()):
-            if hist_dir.is_dir():
-                manifest_path = hist_dir / "manifest.json"
-                version = hist_dir.name
-                trained_at = None
-                if manifest_path.exists():
-                    try:
-                        manifest = json.loads(manifest_path.read_text())
-                        version = manifest.get("version", hist_dir.name)
-                        trained_at = manifest.get("trained_at")
-                    except Exception:
-                        pass
-                adapters.append(
-                    {
-                        "id": str(hist_dir.name),
-                        "version": version,
-                        "path": str(hist_dir),
-                        "trained_at": trained_at,
-                    }
-                )
-
-    if current_dir.exists() and any(current_dir.iterdir()):
-        current_manifest = current_dir / "manifest.json"
-        current_version = "v1 (live)"
-        if current_manifest.exists():
-            try:
-                current_version = (
-                    json.loads(current_manifest.read_text()).get("version", "v1")
-                    + " (live)"
-                )
-            except Exception:
-                pass
-        adapters.append(
-            {
-                "id": "current",
-                "version": current_version,
-                "path": str(current_dir),
-                "trained_at": None,
-                "is_current": True,
-            }
-        )
-
-    return {"adapters": adapters}
-
+    """Proxy adapter list from model server which has the adapter_store volume."""
+    import requests as req
+    model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+    try:
+        resp = req.get(f"{model_url}/adapters", timeout=5)
+        if resp.ok:
+            return resp.json()
+    except Exception as exc:
+        logger.warning("adapters_proxy_error", extra={"error": str(exc)})
+    # Fallback — base model only
+    return {"adapters": [{"id": "base", "version": "Base model", "path": "", "is_base": True}]}
 
 # ── Outputs listing (used by diagnostic panel) ────────────────────────────────
 
