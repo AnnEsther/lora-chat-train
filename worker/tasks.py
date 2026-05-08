@@ -41,9 +41,9 @@ app = Celery(
 )
 app.conf.task_serializer = "json"
 app.conf.result_serializer = "json"
-app.conf.task_acks_late = True          # only ack after task completes
+app.conf.task_acks_late = True  # only ack after task completes
 app.conf.task_reject_on_worker_lost = True  # requeue if worker dies mid-task
-app.conf.worker_prefetch_multiplier = 1     # don't prefetch, one task at a time
+app.conf.worker_prefetch_multiplier = 1  # don't prefetch, one task at a time
 
 # Sync engine for Celery tasks (Celery runs in a sync context)
 engine = create_engine(DATABASE_URL_SYNC, pool_pre_ping=True)
@@ -124,6 +124,7 @@ def enqueue_training_pipeline(self, session_id: str) -> None:
 def enqueue_phase1_pipeline(self, session_id: str) -> None:
     """Phase 1: Extract candidates, curate, extract knowledge, synthesize QA, validate."""
     from backend.models import TrainingRun
+    from shared.mattermost_notifier import pipeline_started as mm_pipeline_started
 
     logger.info("phase1_start", extra={"session_id": session_id})
 
@@ -137,6 +138,17 @@ def enqueue_phase1_pipeline(self, session_id: str) -> None:
         db.add(run)
         db.commit()
         run_id = str(run.id)
+
+    # Post the initial Mattermost progress message and store the post_id
+    mm_post_id = mm_pipeline_started(session_id, run_id)
+    if mm_post_id:
+        with _db() as db:
+            run = db.get(TrainingRun, uuid.UUID(run_id))
+            if run:
+                config = run.config or {}
+                config["mm_post_id"] = mm_post_id
+                run.config = config
+                db.commit()
 
     # Phase 1: Extract → Curate → Knowledge → Synthesize → Validate
     (
@@ -158,11 +170,28 @@ def enqueue_phase2_pipeline(self, session_id: str) -> None:
 
     logger.info("phase2_start", extra={"session_id": session_id})
 
+    # Find the mm_post_id from the Phase 1 run so we can keep editing the same message
+    mm_post_id = None
     with _db() as db:
+        phase1_run = (
+            db.execute(
+                select(TrainingRun)
+                .where(TrainingRun.session_id == uuid.UUID(session_id))
+                .order_by(TrainingRun.created_at.asc())
+            )
+            .scalars()
+            .first()
+        )
+        if phase1_run:
+            mm_post_id = (phase1_run.config or {}).get("mm_post_id")
+
+    with _db() as db:
+        config = {"mm_post_id": mm_post_id} if mm_post_id else {}
         run = TrainingRun(
             id=uuid.uuid4(),
             session_id=uuid.UUID(session_id),
             status="PENDING",
+            config=config,
             created_at=datetime.now(timezone.utc),
         )
         db.add(run)
@@ -286,8 +315,20 @@ def curate_candidates(self, prev: dict, session_id: str, run_id: str) -> dict:
 
     if len(kept) < MIN_TRAINING_SAMPLES:
         from shared.slack_notifier import insufficient_data_warning
+        from shared.mattermost_notifier import insufficient_data as mm_insufficient_data
 
         insufficient_data_warning(session_id, len(kept), MIN_TRAINING_SAMPLES)
+
+        # Update the live Mattermost message
+        with _db() as db:
+            from backend.models import TrainingRun as _TR
+
+            _run = db.get(_TR, uuid.UUID(run_id))
+            _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
+        mm_insufficient_data(
+            session_id, run_id, _mm_post_id, len(kept), MIN_TRAINING_SAMPLES
+        )
+
         _update_run_status(
             run_id, "FAILED", _db(), finished_at=datetime.now(timezone.utc)
         )
@@ -368,6 +409,19 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
         dataset_id = str(dataset.id)
 
     dataset_built(session_id, len(samples), dataset_s3)
+
+    # Update the live Mattermost message — Phase 2 is now running
+    from shared.mattermost_notifier import training_launched as mm_training_launched
+
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
+    mm_training_launched(
+        session_id, run_id, _mm_post_id, f"run_{run_id[:8]}", len(samples)
+    )
+
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -651,12 +705,21 @@ def validate_qa(self, prev: dict, session_id: str, run_id: str) -> dict:
     )
 
     from shared.slack_notifier import training_data_ready
+    from shared.mattermost_notifier import qa_ready as mm_qa_ready
 
     training_data_ready(
         session_id,
         qa_count=len(qa_items),
         validated_count=validated_count,
     )
+
+    # Update the live Mattermost message — Phase 1 done, QA awaiting review
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
+    mm_qa_ready(session_id, run_id, _mm_post_id, len(qa_items), validated_count)
 
     with _db() as db:
         _update_session_state(session_id, "VALIDATING", db)
@@ -765,47 +828,73 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         hf_job_id = launcher.launch(config)
         with _db() as db:
             _update_run_status(
-                run_id, "RUNNING", db,
+                run_id,
+                "RUNNING",
+                db,
                 hf_job_id=hf_job_id,
                 config=config,
                 started_at=datetime.now(timezone.utc),
             )
         training_started(run_id, session_id, hf_job_id)
-        logger.info("training_launched", extra={"run_id": run_id, "hf_job_id": hf_job_id})
+        logger.info(
+            "training_launched", extra={"run_id": run_id, "hf_job_id": hf_job_id}
+        )
         return {"session_id": session_id, "run_id": run_id, "hf_job_id": hf_job_id}
-    
+
     # ── Local training on T4 GPU ──────────────────────────────────────────────
-    logger.info("local_training_start", extra={"run_id": run_id, "session_id": session_id})
+    logger.info(
+        "local_training_start", extra={"run_id": run_id, "session_id": session_id}
+    )
     training_started(run_id, session_id, f"local_{run_id}")
-    
+
     from training.trainer.hf_launcher import train_local
     from shared.s3_uploader import upload_adapter
     from shared.slack_notifier import training_succeeded
-    
+    from shared.mattermost_notifier import (
+        training_done as mm_training_done,
+        training_failed as mm_training_failed,
+    )
+
+    # Fetch mm_post_id once — needed by both failure and success paths
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
+
     with _db() as db:
         _update_run_status(
-            run_id,  "RUNNING", db,
+            run_id,
+            "RUNNING",
+            db,
             hf_job_id=f"local_{run_id}",
             config=config,
             started_at=datetime.now(timezone.utc),
         )
-        
+
     try:
         output_dir = train_local(config, dataset_local)
     except Exception as exc:
-        logger.error("local_training_failed", extra={"run_id": run_id, "error": str(exc)})
+        logger.error(
+            "local_training_failed", extra={"run_id": run_id, "error": str(exc)}
+        )
+        mm_training_failed(session_id, run_id, _mm_post_id, str(exc))
         with _db() as db:
-            _update_run_status(run_id, "FAILED", db, finished_at=datetime.now(timezone.utc))
+            _update_run_status(
+                run_id, "FAILED", db, finished_at=datetime.now(timezone.utc)
+            )
             _update_session_state(session_id, "FAILED", db)
             _set_failure_reason(session_id, f"Local training failed: {exc}", db)
         raise
-    
+
     adapter_s3 = upload_adapter(run_id, output_dir)
     artifact_uploaded(run_id, "adapter", adapter_s3)
 
     with _db() as db:
         _update_run_status(
-            run_id, "SUCCEEDED", db,
+            run_id,
+            "SUCCEEDED",
+            db,
             logs_s3_path=None,
             artifact_s3_path=adapter_s3,
             finished_at=datetime.now(timezone.utc),
@@ -813,7 +902,10 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         _update_session_state(session_id, "EVALUATING", db)
 
     training_succeeded(run_id, adapter_s3)
-    logger.info("local_training_complete", extra={"run_id": run_id, "output": output_dir})
+    mm_training_done(session_id, run_id, _mm_post_id, adapter_s3)
+    logger.info(
+        "local_training_complete", extra={"run_id": run_id, "output": output_dir}
+    )
 
     return {
         "session_id": session_id,
@@ -822,6 +914,7 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         "local": True,
         "artifact_dir": str(output_dir),
     }
+
 
 @app.task(name="tasks.poll_training", bind=True, max_retries=60, default_retry_delay=60)
 def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
@@ -844,6 +937,17 @@ def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         training_failed,
         artifact_uploaded,
     )
+    from shared.mattermost_notifier import (
+        training_done as mm_training_done,
+        training_failed as mm_training_failed,
+    )
+
+    # Fetch mm_post_id once for both failure and success paths
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
 
     hf_job_id = prev["hf_job_id"]
     launcher = HFTrainingLauncher()
@@ -854,6 +958,7 @@ def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
 
     if status == "failed":
         error = launcher.get_error(hf_job_id)
+        mm_training_failed(session_id, run_id, _mm_post_id, str(error))
         with _db() as db:
             _update_run_status(
                 run_id, "FAILED", db, finished_at=datetime.now(timezone.utc)
@@ -887,11 +992,13 @@ def poll_training(self, prev: dict, session_id: str, run_id: str) -> dict:
         _update_session_state(session_id, "EVALUATING", db)
 
     training_succeeded(run_id, artifact_s3)
+    mm_training_done(session_id, run_id, _mm_post_id, artifact_s3)
     return {
         "session_id": session_id,
         "run_id": run_id,
         "artifact_dir": str(adapter_dir),
     }
+
 
 @app.task(name="tasks.run_evaluation", bind=True)
 def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:
@@ -909,6 +1016,7 @@ def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:
         evaluation_completed,
         artifact_uploaded,
     )
+    from shared.mattermost_notifier import eval_result as mm_eval_result
 
     evaluation_started(run_id)
 
@@ -933,6 +1041,15 @@ def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:
         _update_session_state(session_id, "DEPLOYING", db)
 
     evaluation_completed(run_id, passed, score, eval_s3)
+
+    # Update the live Mattermost message with eval result
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
+    mm_eval_result(session_id, run_id, _mm_post_id, passed, score, eval_s3)
+
     return {
         "session_id": session_id,
         "run_id": run_id,
@@ -959,6 +1076,14 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
         rollback_triggered,
         rollback_completed,
     )
+    from shared.mattermost_notifier import pipeline_finished as mm_pipeline_finished
+
+    # Fetch mm_post_id once for all paths
+    with _db() as db:
+        from backend.models import TrainingRun as _TR
+
+        _run = db.get(_TR, uuid.UUID(run_id))
+        _mm_post_id = (_run.config or {}).get("mm_post_id") if _run else None
 
     eval_passed = prev["eval_passed"]
     artifact_dir = prev["artifact_dir"]
@@ -967,6 +1092,13 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
 
     if not eval_passed:
         deployment_rejected(run_id, reason="eval_failed")
+        mm_pipeline_finished(
+            session_id,
+            run_id,
+            _mm_post_id,
+            status="failed",
+            reason="Evaluation did not pass quality checks.",
+        )
         with _db() as db:
             _update_run_status(run_id, "FAILED", db)
             _update_session_state(session_id, "FAILED", db)
@@ -989,11 +1121,25 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
             rollback_triggered(run_id, to_version=previous_version or "base")
             manager.rollback(to_version=previous_version)
             rollback_completed(run_id, to_version=previous_version or "base")
+            mm_pipeline_finished(
+                session_id,
+                run_id,
+                _mm_post_id,
+                status="rolled_back",
+                version=previous_version or "base",
+            )
             with _db() as db:
                 _update_run_status(run_id, "ROLLED_BACK", db)
                 _update_session_state(session_id, "READY", db)
             return {"status": "rolled_back"}
 
+        mm_pipeline_finished(
+            session_id,
+            run_id,
+            _mm_post_id,
+            status="deployed",
+            version=run_id[:8],
+        )
         with _db() as db:
             _update_run_status(run_id, "SUCCEEDED", db)
             _update_session_state(session_id, "READY", db)
@@ -1001,6 +1147,13 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
 
     except Exception as exc:
         adapter_switch_failed(run_id, str(exc))
+        mm_pipeline_finished(
+            session_id,
+            run_id,
+            _mm_post_id,
+            status="failed",
+            reason=f"Deployment error: {exc}",
+        )
         with _db() as db:
             _update_run_status(run_id, "FAILED", db)
             _update_session_state(session_id, "FAILED", db)
