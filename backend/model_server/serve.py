@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+from backend.model_server.local_gpu_serve import _check_gpu
+
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -97,12 +99,65 @@ def _load_adapter(adapter_dir: Path) -> None:
         _adapter_loaded = str(adapter_dir)
         logger.info("adapter_loaded", extra={"dir": str(adapter_dir)})
 
+def _restore_adapter_from_s3() -> bool:
+    """Download production adapter from S3 if local dir is missing/empty."""
+    import os, boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    bucket = os.environ.get("S3_BUCKET", "")
+    aws_key = os.environ.get("AWS_ACCESS_KEY_ID", "")
+    if not bucket or not aws_key:
+        logger.info("S3 not configured — skipping adapter restore")
+        return False
+
+    s3 = boto3.client(
+        "s3",
+        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+        aws_access_key_id=aws_key,
+        aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+    )
+
+    prefix = "production/current/"
+    try:
+        resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        objects = resp.get("Contents", [])
+        if not objects:
+            logger.info("No adapter found in S3 production/current/")
+            return False
+
+        ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
+        for obj in objects:
+            key = obj["Key"]
+            filename = key[len(prefix):]   # strip the prefix
+            if not filename:
+                continue
+            dest = ADAPTER_DIR / filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, key, str(dest))
+            logger.info(f"Restored from S3: {key} → {dest}")
+
+        logger.info("adapter_restored_from_s3")
+        return True
+
+    except (BotoCoreError, ClientError) as e:
+        logger.warning(f"Failed to restore adapter from S3: {e}")
+        return False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    _check_gpu()
     _load_base_model()
-    if ADAPTER_DIR.exists():
-        _load_adapter(ADAPTER_DIR)
+    if not (ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir())):
+        _restore_adapter_from_s3()
+        
+    if ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir()):
+        try:
+            _load_adapter(ADAPTER_DIR)
+        except Exception as exc:
+            logger.warning(f"Failed to load adapter from {ADAPTER_DIR}: {exc}")
+    else:
+        logger.info("No existing adapter — using base model")
     yield
 
 
