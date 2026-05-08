@@ -13,7 +13,6 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-from backend.model_server.local_gpu_serve import _check_gpu
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -146,7 +145,6 @@ def _restore_adapter_from_s3() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    _check_gpu()
     _load_base_model()
     if not (ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir())):
         _restore_adapter_from_s3()
