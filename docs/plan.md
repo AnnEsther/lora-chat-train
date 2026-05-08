@@ -139,19 +139,15 @@ aws ec2 describe-images \
 ### 2.4 Attach an IAM role for S3 access
 
 ```bash
-aws iam create-role --role-name lora-ec2-role \
-  --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+aws iam create-role --role-name lora-ec2-role --assume-role-policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
 
-aws iam attach-role-policy --role-name lora-ec2-role \
-  --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
+aws iam attach-role-policy --role-name lora-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonS3FullAccess
 
 aws iam create-instance-profile --instance-profile-name lora-ec2-profile
-aws iam add-role-to-instance-profile \
-  --instance-profile-name lora-ec2-profile --role-name lora-ec2-role
 
-aws ec2 associate-iam-instance-profile \
-  --instance-id i-XXXXXXXXXXXXXXXXX \
-  --iam-instance-profile Name=lora-ec2-profile
+aws iam add-role-to-instance-profile --instance-profile-name lora-ec2-profile --role-name lora-ec2-role
+
+aws ec2 associate-iam-instance-profile --instance-id i-xxxxxxxxxxxxxxxxxx --iam-instance-profile Name=lora-ec2-profile --region us-east-1
 ```
 
 ---
@@ -163,10 +159,7 @@ aws ec2 associate-iam-instance-profile \
 aws s3 mb s3://your-lora-bucket --region us-east-1
 
 # Block all public access:
-aws s3api put-public-access-block \
-  --bucket your-lora-bucket \
-  --public-access-block-configuration \
-  "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+aws s3api put-public-access-block --bucket your-lora-bucket --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
 ```
 
 ---
@@ -715,3 +708,50 @@ docker compose up --build -d
 |------|--------|--------|
 | 2026-04-29 | Full rewrite: EC2 now t3.large (no GPU); inference moved to private HF vLLM Endpoint; model download step removed; HF endpoint setup added as Step 1; cost table updated; troubleshooting updated for vLLM proxy | opencode |
 | 2026-04-29 | Initial cloud deployment plan created | opencode |
+
+
+Check
+Backend Health
+curl http://localhost:8000/health
+# Expected: {"status":"ok"}
+Public Endpoint health
+curl https://train.anratelier.com/api/health
+# Expected: {"status":"ok"}
+4. Model server reachable
+curl http://localhost:8001/health
+5. Database tables exist
+docker compose exec postgres psql -U lora -d lora -c "\dt"
+6. Worker connected
+docker compose logs --tail=20 worker
+7. Frontend loads
+Open https://train.anratelier.com in your browser — you should see the chat UI.
+8. Full end-to-end test
+
+Create a session in the browser
+Send a chat message
+You should get a streamed response back
+
+
+Option 1 — Nginx Basic Auth (simplest, no code changes)
+Just adds a username/password prompt at the browser level.
+bash# Install apache2-utils for htpasswd
+sudo apt install apache2-utils
+
+# Create a password file (replace 'ann' with your username)
+sudo htpasswd -c /etc/nginx/.htpasswd ann
+# It will prompt you to enter and confirm a password
+Then update your Nginx config:
+bashsudo nano /etc/nginx/sites-available/lora-chat
+Add these two lines inside the location / block:
+nginxlocation / {
+    auth_basic "Restricted";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+    proxy_pass http://localhost:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+Reload Nginx:
+bashsudo nginx -t && sudo systemctl reload nginx
+Now visiting https://train.anratelier.com will show a browser login prompt.
+
+sasquatch

@@ -89,10 +89,12 @@ vLLM returns OpenAI-format SSE (`choices[].delta.content`). `hf_serve.py` transl
 ## Endpoints (`serve.py` — container server)
 | Method | Path | Notes |
 |--------|------|-------|
-| `POST` | `/chat` | Streaming SSE |
-| `POST` | `/generate` | Non-streaming |
-| `POST` | `/reload_adapter` | Hot-swap adapter |
-| `GET` | `/health` | Model state |
+| `POST` | `/chat` | Streaming SSE inference |
+| `POST` | `/generate` | Non-streaming single response |
+| `POST` | `/reload_adapter` | Hot-swap PEFT adapter (thread-safe via `_model_lock`) |
+| `GET` | `/health` | `{status, model_loaded, adapter}` |
+| `GET` | `/adapters` | Lists base + `adapters/history/` + `adapters/current/`; reads `manifest.json` |
+| `GET` | `/train/status` | Always returns `{status: "idle", ...}` (no in-process training in this variant) |
 
 ## Key Functions (`local_gpu_serve.py`)
 
@@ -134,16 +136,19 @@ adapters/
 ## Configuration
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `BASE_MODEL` | — | HuggingFace model ID (e.g., `meta-llama/Llama-3.2-1B-Instruct`) |
+| `BASE_MODEL` | `meta-llama/Llama-3.2-1B-Instruct` (serve.py) / `Qwen/Qwen2.5-1.5B-Instruct` (local_gpu_serve.py) | HuggingFace model ID |
 | `MODEL_SERVER_URL` | — | URL backend uses to reach this server |
-| `MAX_NEW_TOKENS` | — | Max tokens generated per response |
-| `TEMPERATURE` | — | Sampling temperature |
+| `MAX_NEW_TOKENS` | `512` | Max tokens generated per response |
+| `TEMPERATURE` | `0.7` | Sampling temperature |
 | `ADAPTER_DIR` | `/adapters/current` | Production adapter path |
+| `ADAPTER_HISTORY_DIR` | `/adapters/history` | Archive path for previous adapters |
+| `HF_TOKEN` | — | Required by `serve.py` to load gated HF models |
 
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Expand serve.py endpoint table to include /adapters and /train/status; expand configuration table with defaults, ADAPTER_HISTORY_DIR, HF_TOKEN | opencode |
 | 2026-04-29 | Switched hf_serve.py from TGI to vLLM (TGI deprecated for new endpoints); HF_ENDPOINT_MODEL now defaults to BASE_MODEL | opencode |
 | 2026-04-29 | Added hf_serve.py — thin proxy to private HF Dedicated Inference Endpoint; no local GPU needed for inference | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

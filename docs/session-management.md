@@ -40,9 +40,19 @@ VALIDATING ──→ [user reviews QA modal] ──→ TRAINING ──→ EVALUA
 ## API Endpoints
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/sessions` | Create session; optional `adapter_id`, `system_prompt`, `training_system_prompt` |
-| `GET` | `/sessions/{id}` | Fetch session metadata; also polls model server for training completion |
+| `POST` | `/sessions` | Create session; optional `adapter_id`, `system_prompt`, `training_system_prompt`; loads adapter on model server if `adapter_id` provided |
+| `POST` | `/load_adapter` | Load an adapter on the model server without creating a new session |
+| `GET` | `/sessions/{id}` | Fetch session metadata; auto-transitions to `READY` if model server reports training completed |
 | `GET` | `/sessions` | List 20 most recent sessions |
+| `GET` | `/sessions/{id}/qa` | List all synthesized Q&A for the session |
+| `PUT` | `/sessions/{id}/qa/{qa_id}` | Edit a Q&A pair (question, answer, validated flag) |
+| `DELETE` | `/sessions/{id}/qa/{qa_id}` | Permanently delete a Q&A entry |
+| `POST` | `/sessions/{id}/qa/validate-mark` | Bulk-mark all unvalidated Q&A as validated |
+| `POST` | `/sessions/{id}/start-training` | Trigger Phase 2 pipeline after user validates QA (requires `VALIDATING` state + at least one validated QA) |
+| `POST` | `/sessions/{id}/restart-training` | Re-queue Phase 2 from `launch_training` for a failed run (re-uses existing dataset) |
+| `GET` | `/adapters` | Proxy adapter list from the model server (falls back to base-only list on error) |
+| `GET` | `/outputs` | List up to 30 most-recent files in `LOCAL_OUTPUT_DIR` for the diagnostic panel |
+| `GET` | `/health` | Returns `{"status": "ok"}` |
 
 ## Configuration
 | Env Var | Default | Description |
@@ -53,9 +63,10 @@ VALIDATING ──→ [user reviews QA modal] ──→ TRAINING ──→ EVALUA
 ## State Transition Logic (`_transition()`)
 - Located at `backend/main.py`
 - Atomically updates `session.state` via SQLAlchemy
-- Sets `closed_at` only for `SLEEPING` — `FAILED` sessions remain open for continued chat
+- Sets `closed_at` only when transitioning to `SLEEPING` — no other state sets `closed_at`
+- `FAILED` and `VALIDATING` sessions do **not** set `closed_at`; the session stays open
 - `failure_reason` is written by `_set_failure_reason()` in `worker/tasks.py` at each FAILED site
-- Raises `HTTPException(400)` if the state is already set to the target
+- Does **not** raise on re-transition to the same state (unlike older versions)
 
 ## Frontend Behaviour
 - On mount: restores last session ID from `localStorage`
@@ -69,5 +80,7 @@ VALIDATING ──→ [user reviews QA modal] ──→ TRAINING ──→ EVALUA
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Add DELETE /sessions/{id}/qa/{qa_id} endpoint to table | opencode |
+| 2026-05-08 | Expanded API endpoints table to include all 11 endpoints; clarified _transition closed_at behaviour (SLEEPING only, not VALIDATING/FAILED); removed erroneous HTTPException(400) note on re-transition | opencode |
 | 2026-04-29 | FAILED sessions no longer set closed_at; failure_reason column added; chat input unlocked on FAILED; system messages injected in chat on FAILED and INSUFFICIENT_DATA transitions | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

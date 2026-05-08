@@ -39,10 +39,10 @@ One function per pipeline stage, called by Celery tasks:
 | `upload_dataset_jsonl` | `sessions/{session_id}/dataset/dataset.jsonl` |
 | `upload_training_config` | `training_runs/{run_id}/config/config.json` |
 | `upload_training_logs` | `training_runs/{run_id}/logs/training.log` |
-| `upload_adapter` | `training_runs/{run_id}/adapter/` |
-| `upload_eval_report` | `training_runs/{run_id}/eval/report.json` |
-| `upload_deployment_manifest` | `training_runs/{run_id}/deployment/manifest.json` |
-| `upload_rollback_manifest` | `training_runs/{run_id}/rollback/manifest.json` |
+| `upload_adapter` | `training_runs/{run_id}/artifacts/` (directory upload) |
+| `upload_eval_report` | `training_runs/{run_id}/eval/eval_report.json` |
+| `upload_deployment_manifest` | `production/current/manifest.json` |
+| `upload_rollback_manifest` | `production/history/{run_id}/rollback_manifest.json` |
 | `sync_adapter_to_production` | `production/current/` + `production/history/{run_id}/` |
 
 ### Configuration
@@ -94,7 +94,7 @@ All return values are `local://{absolute_path}` URIs, so calling code treats the
   - Field rows for all optional fields that are set
 - Silently skips (no-op) if `SLACK_WEBHOOK_URL` is not configured
 
-### 26 Convenience Wrappers
+### 22 Convenience Wrappers
 Covering every named pipeline event. Call these from Celery tasks or backend code:
 
 `session_started`, `pre_sleep_warning`, `session_sleeping`, `extraction_completed`, `curation_completed`, `knowledge_extracted`, `qa_synthesized`, `training_data_ready`, `dataset_built`, `artifact_uploaded`, `training_started`, `training_succeeded`, `training_failed`, `evaluation_started`, `evaluation_completed`, `deployment_approved`, `deployment_rejected`, `adapter_switch_succeeded`, `adapter_switch_failed`, `rollback_triggered`, `rollback_completed`, `insufficient_data_warning`
@@ -109,5 +109,6 @@ Covering every named pipeline event. Call these from Celery tasks or backend cod
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Fix S3 key paths: upload_adapter now artifacts/ (not adapter/), upload_eval_report now eval_report.json, upload_deployment_manifest now production/current/manifest.json, upload_rollback_manifest now production/history/{run_id}/rollback_manifest.json; fix wrapper count to 22 | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Remove extraction_started, curation_started; add knowledge_extracted, qa_synthesized, training_data_ready | opencode |

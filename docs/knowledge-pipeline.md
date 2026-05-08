@@ -18,17 +18,19 @@ The knowledge pipeline sits between curation and dataset building (Phase 1). It 
 **Output:** `list[ExtractedTopic]`
 
 - Classifies into one of 10 topic domains using keyword matching against `TOPIC_PATTERNS`:
-  `programming`, `math`, `science`, `history`, `language`, `cooking`, `health`, `business`, `technology`, `general`
+  `programming`, `math`, `science`, `history`, `language`, `cooking`, `health`, `technology`, `finance`, `general`
 - Classifies user intent: `question | explanation | task | conversation` via regex on the user turn
-- Each `ExtractedTopic` carries: `topic`, `intent`, `confidence`
+- Each `ExtractedTopic` carries: `topic`, `subtopics: list[str]`, `keywords: list[str]`, `intent: str`
+- There is **no** `confidence` field on `ExtractedTopic`
 
 ### 2. `KnowledgeNormalizer` — Structured Fact Extraction
 **Input:** `user_turn`, `assistant_turn`, `list[ExtractedTopic]`
 **Output:** `list[KnowledgeRecord]`
 
 - Converts raw text into typed fact records
-- Handles 6 fact types: `fact`, `definition`, `qa_pair`, `code_example`, `step`, `task`
-- Each `KnowledgeRecord` carries: `topic`, `facts` (list[dict])
+- Handles 5 fact types: `qa_pair`, `fact`, `code_example`, `step`, `task`
+- Each `KnowledgeRecord` carries: `topic: str`, `facts: list[dict]`, `source_type: str`
+- The primary extraction always creates a `qa_pair` (LLM-asks/user-answers framing), then extracts factual sentences and code blocks from the assistant turn
 
 ### 3. `QASynthesizer` — Q&A Generation
 **Input:** `list[KnowledgeRecord]`, `system_prompt`
@@ -71,17 +73,22 @@ Scores on 4 dimensions:
 
 ## QA Review Modal (Frontend)
 - Auto-opens when session enters `VALIDATING` state
-- Card-by-card navigation through all Q&A pairs
-- Inline editing of question and answer text
-- Per-item "Mark Validated" button
+- Header shows total pair count and a progress bar indicating how many have been validated
+- Card-by-card navigation (Previous / Next) with an unsaved-changes guard: if edits are pending, the user is prompted to Save & Continue or Discard & Continue before moving
+- Inline editing of question and answer text; an "Unsaved changes" indicator appears on the card when local edits exist
+- "Save changes" button appears on the card only when there are unsaved edits
+- Per-item "Mark as Validated" / "Unmark validation" toggle button
+- Validated cards have a green left border; needs-review cards have an amber border
+- "Delete entry" button in the navigation row; triggers an inline confirmation before deleting (calls `DELETE /sessions/{id}/qa/{qa_id}`)
 - "Validate All & Start Training" — calls `POST /sessions/{id}/qa/validate-mark` then `POST /sessions/{id}/start-training`
-- Shows `validation_notes` from the automated validator for each item
+- Shows `validation_notes` labelled as "Automated validator notes" on each card
 
 ## API Endpoints (QA Review)
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/sessions/{id}/qa` | List all synthesized Q&A for the session |
 | `PUT` | `/sessions/{id}/qa/{qa_id}` | Edit a Q&A pair (question, answer, validated flag) |
+| `DELETE` | `/sessions/{id}/qa/{qa_id}` | Permanently delete a Q&A entry |
 | `POST` | `/sessions/{id}/qa/validate-mark` | Bulk-mark all Q&A as validated |
 | `POST` | `/sessions/{id}/start-training` | Trigger Phase 2 after user validates QA |
 
@@ -89,5 +96,7 @@ Scores on 4 dimensions:
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Add DELETE /sessions/{id}/qa/{qa_id} endpoint; overhaul QA Review Modal: progress bar, card status badges, inline delete confirmation, unsaved-changes guard, Save button, unmark validation | opencode |
+| 2026-05-08 | Fix ExtractedTopic fields (subtopics + keywords + intent, no confidence); fix topic domains (business→finance); fix KnowledgeRecord fact types (5 types, not 6; no definition type); add source_type to KnowledgeRecord | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Update KnowledgeRecord output to match corrected model (topic, facts list[dict]) | opencode |

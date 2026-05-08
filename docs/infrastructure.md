@@ -35,16 +35,18 @@ The application is containerised with Docker Compose. Six services cover the ful
 ### `worker`
 - Built from `./worker/Dockerfile`
 - No exposed port
-- Concurrency: 2 workers (`--concurrency 2`)
-- Volume mounts: `worker/`, `shared/`, `training/`, `outputs/`
+- Concurrency: **1** (`--concurrency=1`) — single-threaded to avoid GPU contention during training
+- Volume mounts: `worker/`, `shared/`, `training/`, `outputs/`, `backend/` (for model imports), `adapter_store` (at `/adapters`)
+- GPU reservation: `capabilities: [gpu]` — required for local training tasks
 - Depends on: `postgres`, `redis`
 
 ### `model_server`
-- Built from `./backend/Dockerfile.model`
+- Built from `./backend/Dockerfile.model.gpu`
 - Port: `8001`
 - **GPU reservation:** `capabilities: [gpu]` — requires NVIDIA container toolkit
-- Named volume `adapter_store` mounted at `/adapters` (persists adapter files across container restarts)
-- Runs `local_gpu_serve.py` for RTX 4060 dev setups; swap to `serve.py` for CPU/cloud
+- Named volume `adapter_store` mounted at `/adapters` (shared with worker; persists adapter files across container restarts)
+- Also mounts `outputs/` directory
+- Runs `backend/model_server/serve.py` (Docker/production); swap to `local_gpu_serve.py` for local RTX 4060 dev or `hf_serve.py` for HF-hosted inference
 
 ### `frontend`
 - Built from `./frontend/Dockerfile`
@@ -55,7 +57,7 @@ The application is containerised with Docker Compose. Six services cover the ful
 | Volume | Used by | Purpose |
 |--------|---------|---------|
 | `postgres_data` | postgres | Persistent database storage |
-| `adapter_store` | model_server | Persistent LoRA adapter storage (survives container restarts) |
+| `adapter_store` | model_server, worker | Persistent LoRA adapter storage; shared so the worker can write new adapters and the model server can hot-swap them |
 
 ## Makefile Commands
 | Command | Description |
@@ -64,6 +66,7 @@ The application is containerised with Docker Compose. Six services cover the ful
 | `make down` | `docker compose down` — stop all services |
 | `make db` | Start only `postgres` + `redis` |
 | `make init-db` | Run `scripts/init_db.py` to apply schema |
+| `make reset-all` | Run `scripts/reset_all.py` — wipe all DB data + clear adapter/output files |
 | `make backend` | Start FastAPI backend locally (no Docker) |
 | `make worker` | Start Celery worker locally (no Docker) |
 | `make frontend` | Start Next.js dev server locally |
@@ -76,19 +79,25 @@ All services read from `.env` (see `.env.example`).
 
 | Var | Description |
 |-----|-------------|
-| `DATABASE_URL` | PostgreSQL DSN with `+asyncpg` for backend; plain `postgresql://` for scripts |
+| `DATABASE_URL` | PostgreSQL DSN with `+asyncpg` for backend; plain `postgresql://` for scripts/Celery |
 | `REDIS_URL` | Redis connection URL |
 | `CELERY_BROKER_URL` | Redis URL for Celery broker |
-| `CELERY_RESULT_BACKEND` | Redis URL for Celery result storage |
+| `CELERY_RESULT_BACKEND` | Redis URL for Celery result storage (default `redis://localhost:6379/1`) |
 | `HF_TOKEN` | HuggingFace API token |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS credentials for S3 |
-| `S3_BUCKET` | S3 bucket for artifacts |
-| `SLACK_WEBHOOK_URL` | Slack notifications webhook |
+| `HF_ENDPOINT_URL` | Full URL of your private vLLM inference endpoint (only for `hf_serve.py`) |
+| `HF_TRAINING_ENDPOINT` | HF endpoint URL for training; if absent, uses local model server |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS credentials for S3 (optional; falls back to local storage) |
+| `S3_BUCKET` | S3 bucket for artifacts (optional; falls back to local storage) |
+| `AWS_REGION` | AWS region (default `us-east-1`) |
+| `SLACK_WEBHOOK_URL` | Slack notifications webhook (optional; silent if absent) |
 | `BASE_MODEL` | Base LLM model ID (e.g., `meta-llama/Llama-3.2-1B-Instruct`) |
 | `MODEL_SERVER_URL` | URL backend uses to reach model server (e.g., `http://model_server:8001`) |
 | `MAX_SESSION_TOKENS` | Token budget per session (default `4096`) |
 | `PRE_SLEEP_THRESHOLD` | Warning threshold in remaining tokens (default `512`) |
-| `MIN_TRAINING_SAMPLES` | Minimum curated pairs to start training (default `10`) |
+| `MIN_TRAINING_SAMPLES` | Minimum curated samples to start training (default `10`) |
+| `LOCAL_OUTPUT_DIR` | Override for local artifact storage directory (default `<project_root>/outputs/`) |
+| `NEXT_PUBLIC_API_URL` | Frontend: backend API base URL (build arg; default `http://localhost:8000`) |
+| `NEXT_PUBLIC_MODEL_SERVER_URL` | Frontend: model server base URL (build arg; default `http://localhost:8001`) |
 
 ## GPU Requirements
 The model server requires an NVIDIA GPU with CUDA support. Tested on RTX 4060 (8 GB VRAM) with:
@@ -110,4 +119,5 @@ For CPU-only or cloud deployment: use `backend/model_server/serve.py` instead an
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Fix worker concurrency to 1; fix model_server Dockerfile to Dockerfile.model.gpu; note adapter_store shared with worker; add reset-all to Makefile table; expand env vars table with HF_ENDPOINT_URL, HF_TRAINING_ENDPOINT, AWS_REGION, LOCAL_OUTPUT_DIR, NEXT_PUBLIC_MODEL_SERVER_URL | opencode |
 | 2026-04-28 | Initial documentation created | opencode |

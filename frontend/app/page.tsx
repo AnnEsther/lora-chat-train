@@ -468,6 +468,8 @@ export default function ChatPage() {
   const [qaItems, setQaItems] = useState<{id: string; question: string; answer: string; validated: boolean; edited: boolean; retry_count: number; validation_notes: string}[]>([]);
   const [qaCurrentIndex, setQaCurrentIndex] = useState(0);
   const [qaLoading, setQaLoading] = useState(false);
+  const [qaDeleteConfirm, setQaDeleteConfirm] = useState(false);
+  const [qaUnsavedConfirm, setQaUnsavedConfirm] = useState<"prev" | "next" | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
 
@@ -567,6 +569,33 @@ export default function ChatPage() {
     } catch {}
   };
 
+  const deleteQaItem = async (id: string) => {
+    if (!session) return;
+    try {
+      await fetch(`${API_URL}/sessions/${session.id}/qa/${id}`, { method: "DELETE" });
+      const newItems = qaItems.filter(item => item.id !== id);
+      setQaItems(newItems);
+      setQaCurrentIndex(prev => Math.min(prev, Math.max(0, newItems.length - 1)));
+      setQaDeleteConfirm(false);
+    } catch {}
+  };
+
+  const saveCurrentCard = async () => {
+    const item = qaItems[qaCurrentIndex];
+    if (!item) return;
+    await updateQaItem(item.id, { question: item.question, answer: item.answer });
+  };
+
+  const navigateTo = (direction: "prev" | "next") => {
+    const item = qaItems[qaCurrentIndex];
+    if (item?.edited) {
+      setQaUnsavedConfirm(direction);
+      return;
+    }
+    if (direction === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
+    else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
+  };
+
   const markAllValidated = async () => {
     if (!session) return;
     try {
@@ -579,6 +608,8 @@ export default function ChatPage() {
 
   const openQaReview = () => {
     setQaReviewOpen(true);
+    setQaDeleteConfirm(false);
+    setQaUnsavedConfirm(null);
     fetchQaItems();
   };
 
@@ -1060,92 +1091,258 @@ export default function ChatPage() {
 
       {/* ── QA Review Modal ── */}
       {qaReviewOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b">
-              <h2 className="font-semibold text-gray-700">Review Training Data</h2>
-              <button onClick={() => setQaReviewOpen(false)} className="text-gray-500 hover:text-gray-700">✕</button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4">
-              {qaLoading ? (
-                <p className="text-center text-gray-500 py-8">Loading...</p>
-              ) : qaItems.length === 0 ? (
-                <p className="text-center text-gray-500 py-8">No training data to review yet.</p>
-              ) : (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between text-sm text-gray-500">
-                    <span>Item {qaCurrentIndex + 1} of {qaItems.length}</span>
-                    <span>{qaItems[qaCurrentIndex]?.validated ? "✓ Validated" : qaItems[qaCurrentIndex]?.retry_count >= 3 ? "⚠ Needs review" : "Pending"}</span>
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">Question</label>
-                    <textarea
-                      value={qaItems[qaCurrentIndex]?.question || ""}
-                      onChange={(e) => {
-                        const newItems = [...qaItems];
-                        newItems[qaCurrentIndex].question = e.target.value;
-                        newItems[qaCurrentIndex].edited = true;
-                        setQaItems(newItems);
-                      }}
-                      className="w-full text-sm px-3 py-2 rounded border border-gray-300 resize-none"
-                      rows={3}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">Answer</label>
-                    <textarea
-                      value={qaItems[qaCurrentIndex]?.answer || ""}
-                      onChange={(e) => {
-                        const newItems = [...qaItems];
-                        newItems[qaCurrentIndex].answer = e.target.value;
-                        newItems[qaCurrentIndex].edited = true;
-                        setQaItems(newItems);
-                      }}
-                      className="w-full text-sm px-3 py-2 rounded border border-gray-300 resize-none"
-                      rows={6}
-                    />
-                  </div>
-                  {qaItems[qaCurrentIndex]?.validation_notes && (
-                    <p className="text-xs text-gray-500 bg-gray-50 p-2 rounded">{qaItems[qaCurrentIndex].validation_notes}</p>
-                  )}
-                  <div className="flex items-center justify-between">
-                    <button
-                      onClick={() => setQaCurrentIndex(Math.max(0, qaCurrentIndex - 1))}
-                      disabled={qaCurrentIndex === 0}
-                      className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
-                    >
-                      Previous
-                    </button>
-                    <button
-                      onClick={() => updateQaItem(qaItems[qaCurrentIndex].id, {validated: true})}
-                      className="text-xs px-3 py-1.5 rounded bg-green-100 hover:bg-green-200 text-green-700"
-                    >
-                      Mark Validated
-                    </button>
-                    <button
-                      onClick={() => setQaCurrentIndex(Math.min(qaItems.length - 1, qaCurrentIndex + 1))}
-                      disabled={qaCurrentIndex === qaItems.length - 1}
-                      className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
-                    >
-                      Next
-                    </button>
-                  </div>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+
+            {/* Header */}
+            <div className="px-5 py-4 border-b">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h2 className="font-semibold text-gray-800 text-base">Review Training Data</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {qaLoading
+                      ? "Loading Q&A pairs…"
+                      : qaItems.length === 0
+                      ? "No training data to review yet."
+                      : `Review ${qaItems.length} generated Q&A pair${qaItems.length !== 1 ? "s" : ""} before training begins.`}
+                  </p>
                 </div>
-              )}
+                <button
+                  onClick={() => setQaReviewOpen(false)}
+                  className="text-gray-400 hover:text-gray-600 text-lg leading-none ml-4 mt-0.5"
+                  title="Close"
+                >✕</button>
+              </div>
+
+              {/* Progress bar */}
+              {!qaLoading && qaItems.length > 0 && (() => {
+                const validatedCount = qaItems.filter(q => q.validated).length;
+                const pct = Math.round((validatedCount / qaItems.length) * 100);
+                return (
+                  <div className="mt-3 space-y-1">
+                    <div className="flex items-center justify-between text-xs text-gray-500">
+                      <span className="font-medium text-gray-700">{qaCurrentIndex + 1} / {qaItems.length}</span>
+                      <span>{validatedCount} of {qaItems.length} validated</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-green-500 rounded-full transition-all duration-300"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
-            <div className="flex items-center justify-between px-4 py-3 border-t">
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto p-5">
+              {qaLoading ? (
+                <div className="flex items-center justify-center py-12 text-gray-400 text-sm">
+                  <svg className="animate-spin h-5 w-5 mr-2 text-gray-400" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                  </svg>
+                  Loading training data…
+                </div>
+              ) : qaItems.length === 0 ? (
+                <p className="text-center text-gray-500 py-10 text-sm">No training data to review yet.</p>
+              ) : (() => {
+                const item = qaItems[qaCurrentIndex];
+
+                /* ── Unsaved-changes guard ── */
+                if (qaUnsavedConfirm) {
+                  return (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-5 space-y-4">
+                      <p className="text-sm font-medium text-amber-800">You have unsaved changes on this entry.</p>
+                      <p className="text-xs text-amber-700">Would you like to save them before moving on, or discard them?</p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={async () => {
+                            await saveCurrentCard();
+                            const dir = qaUnsavedConfirm;
+                            setQaUnsavedConfirm(null);
+                            if (dir === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
+                            else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
+                          }}
+                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                        >
+                          Save &amp; Continue
+                        </button>
+                        <button
+                          onClick={async () => {
+                            const dir = qaUnsavedConfirm;
+                            setQaUnsavedConfirm(null);
+                            await fetchQaItems();
+                            if (dir === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
+                            else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
+                          }}
+                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium"
+                        >
+                          Discard &amp; Continue
+                        </button>
+                        <button
+                          onClick={() => setQaUnsavedConfirm(null)}
+                          className="text-sm px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-600"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                /* ── Delete confirmation ── */
+                if (qaDeleteConfirm) {
+                  return (
+                    <div className="rounded-lg border border-red-200 bg-red-50 p-5 space-y-4">
+                      <p className="text-sm font-medium text-red-800">Delete this entry?</p>
+                      <p className="text-xs text-red-700">This Q&amp;A pair will be permanently removed from your training data. This cannot be undone.</p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => deleteQaItem(item.id)}
+                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium"
+                        >
+                          Yes, delete it
+                        </button>
+                        <button
+                          onClick={() => setQaDeleteConfirm(false)}
+                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  );
+                }
+
+                /* ── Card ── */
+                const isValidated = item.validated;
+                const needsReview = !isValidated && item.retry_count >= 3;
+                const isPending   = !isValidated && item.retry_count < 3;
+
+                return (
+                  <div className={`rounded-lg border-l-4 border bg-white shadow-sm ${isValidated ? "border-l-green-500 border-green-200" : needsReview ? "border-l-amber-400 border-amber-200" : "border-l-gray-300 border-gray-200"}`}>
+                    {/* Card header: status badge */}
+                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
+                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${isValidated ? "bg-green-100 text-green-700" : needsReview ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
+                        {isValidated ? "✓ Validated" : needsReview ? "⚠ Needs review" : "Pending"}
+                      </span>
+                      {item.edited && (
+                        <span className="text-xs text-amber-600 font-medium flex items-center gap-1">
+                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400"/>
+                          Unsaved changes
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="p-4 space-y-4">
+                      {/* Question */}
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Question</label>
+                        <textarea
+                          value={item.question}
+                          onChange={(e) => {
+                            const newItems = [...qaItems];
+                            newItems[qaCurrentIndex] = { ...newItems[qaCurrentIndex], question: e.target.value, edited: true };
+                            setQaItems(newItems);
+                          }}
+                          className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
+                          rows={3}
+                        />
+                      </div>
+
+                      {/* Answer */}
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Answer</label>
+                        <textarea
+                          value={item.answer}
+                          onChange={(e) => {
+                            const newItems = [...qaItems];
+                            newItems[qaCurrentIndex] = { ...newItems[qaCurrentIndex], answer: e.target.value, edited: true };
+                            setQaItems(newItems);
+                          }}
+                          className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
+                          rows={6}
+                        />
+                      </div>
+
+                      {/* Save button — only visible when unsaved */}
+                      {item.edited && (
+                        <div className="flex justify-end">
+                          <button
+                            onClick={saveCurrentCard}
+                            className="text-xs px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors"
+                          >
+                            Save changes
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Validator notes */}
+                      {item.validation_notes && (
+                        <div className="bg-gray-50 rounded-lg px-3 py-2.5 border border-gray-100">
+                          <p className="text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Automated validator notes</p>
+                          <p className="text-xs text-gray-600">{item.validation_notes}</p>
+                        </div>
+                      )}
+
+                      {/* Mark validated */}
+                      {!isValidated && (
+                        <button
+                          onClick={() => updateQaItem(item.id, { validated: true })}
+                          className="w-full text-sm px-3 py-2 rounded-lg bg-green-50 hover:bg-green-100 text-green-700 font-medium border border-green-200 transition-colors"
+                        >
+                          Mark as Validated
+                        </button>
+                      )}
+                      {isValidated && (
+                        <button
+                          onClick={() => updateQaItem(item.id, { validated: false })}
+                          className="w-full text-sm px-3 py-2 rounded-lg bg-gray-50 hover:bg-gray-100 text-gray-500 font-medium border border-gray-200 transition-colors"
+                        >
+                          Unmark validation
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Navigation row */}
+            {!qaLoading && qaItems.length > 0 && !qaUnsavedConfirm && !qaDeleteConfirm && (
+              <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50 rounded-b-none">
+                <button
+                  onClick={() => navigateTo("prev")}
+                  disabled={qaCurrentIndex === 0}
+                  className="text-sm px-4 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed font-medium transition-colors"
+                >
+                  ← Previous
+                </button>
+                <button
+                  onClick={() => { setQaDeleteConfirm(true); }}
+                  className="text-sm px-3 py-1.5 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 font-medium transition-colors"
+                >
+                  Delete entry
+                </button>
+                <button
+                  onClick={() => navigateTo("next")}
+                  disabled={qaCurrentIndex === qaItems.length - 1}
+                  className="text-sm px-4 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed font-medium transition-colors"
+                >
+                  Next →
+                </button>
+              </div>
+            )}
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-5 py-3 border-t">
               <button
-                onClick={() => {
-                  if (qaItems[qaCurrentIndex]?.edited) {
-                    updateQaItem(qaItems[qaCurrentIndex].id, {
-                      question: qaItems[qaCurrentIndex].question,
-                      answer: qaItems[qaCurrentIndex].answer,
-                    });
-                  }
-                }}
-                className="text-xs px-3 py-1.5 rounded bg-gray-100 hover:bg-gray-200"
+                onClick={() => setQaReviewOpen(false)}
+                className="text-sm px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium transition-colors"
               >
-                Save Current
+                Close
               </button>
               <button
                 onClick={async () => {
@@ -1161,11 +1358,12 @@ export default function ChatPage() {
                     } catch {}
                   }
                 }}
-                className="text-xs px-4 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white"
+                className="text-sm px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors"
               >
-                Validate All & Start Training
+                Validate All &amp; Start Training
               </button>
             </div>
+
           </div>
         </div>
       )}

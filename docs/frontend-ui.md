@@ -4,7 +4,7 @@
 A single-page Next.js 15 application (App Router, Client Component) that provides the complete user interface: chat, session management, QA review, adapter selection, and a live diagnostic panel.
 
 ## Key Files
-- `frontend/app/page.tsx` — Entire UI (1133 lines); all state, components, and logic in one file
+- `frontend/app/page.tsx` — Entire UI (1174 lines); all state, components, and logic in one file
 - `frontend/app/layout.tsx` — Root HTML shell
 - `frontend/next.config.js` — Next.js configuration
 - `frontend/tailwind.config.ts` — Tailwind CSS configuration
@@ -16,25 +16,40 @@ A single-page Next.js 15 application (App Router, Client Component) that provide
 | `session` | `Session \| null` | Currently active session |
 | `messages` | `Message[]` | Chat message array with `streaming` flag |
 | `input` | `string` | Current textarea value |
-| `health` | `ModelHealth` | Model server health snapshot |
+| `loading` | `boolean` | True while a message stream is in progress |
+| `error` | `string \| null` | Global error message |
+| `health` | `ModelHealth \| null` | Model server health snapshot |
 | `trainStatus` | `TrainStatus \| null` | Training progress from model server |
+| `outputFiles` | `OutputFile[]` | Files from `GET /outputs` for the diagnostic panel |
 | `adapters` | `Adapter[]` | Available adapters |
 | `selectedAdapter` | `string \| null` | Adapter to load on next new session |
-| `qaItems` | `SynthesizedQA[]` | Q&A pairs for the review modal |
-| `systemPrompt` | `string` | Chat system prompt override |
 | `trainingSystemPrompt` | `string` | Training dataset system prompt override |
+| `lastPoll` | `Date \| null` | Timestamp of last background poll |
+| `panelOpen` | `boolean` | Diagnostic panel visibility toggle |
+| `pollActive` | `boolean` | Whether session-state polling is running |
+| `systemPrompt` | `string` | Chat system prompt override |
+| `qaReviewOpen` | `boolean` | QA review modal open state |
+| `qaItems` | `SynthesizedQA[]` | Q&A pairs for the review modal |
+| `qaCurrentIndex` | `number` | Current card index in the QA modal |
+| `qaLoading` | `boolean` | True while fetching QA items |
 
-## TypeScript Interfaces
+## TypeScript Interfaces & Types
 ```typescript
+interface Message {
+  role: "user" | "assistant" | "system";
+  content: string;
+  streaming?: boolean;
+}
+
 interface Session {
   id: string;
   state: SessionState;
   total_tokens: number;
   max_tokens: number;
   created_at: string;
-  closed_at: string | null;
-  system_prompt: string | null;
-  training_system_prompt: string | null;
+  system_prompt?: string;
+  training_system_prompt?: string;
+  failure_reason?: string;
 }
 
 type SessionState =
@@ -42,10 +57,37 @@ type SessionState =
   | "VALIDATING" | "SLEEPING" | "TRAINING"
   | "EVALUATING" | "DEPLOYING" | "READY" | "FAILED";
 
-interface Message {
-  role: "user" | "assistant" | "system";
-  content: string;
-  streaming?: boolean;
+interface TrainStatus {
+  status: "idle" | "running" | "completed" | "failed";
+  run_id?: string;
+  progress: string;
+  started_at: string | null;
+  finished_at: string | null;
+  vram_used_gb: number | null;
+  vram_free_gb: number | null;
+}
+
+interface ModelHealth {
+  status: string;
+  model_loaded: boolean;
+  adapter: string | null;
+  training_active: boolean;
+  gpu: { name: string; vram_total_gb: number; vram_used_gb: number } | null;
+}
+
+interface OutputFile {
+  name: string;
+  path: string;
+  size: string;
+}
+
+interface Adapter {
+  id: string;
+  version: string;
+  path: string;
+  trained_at: string | null;
+  is_current?: boolean;
+  is_base?: boolean;
 }
 ```
 
@@ -123,11 +165,13 @@ Sections:
 ## Configuration
 | Env Var | Description |
 |---------|-------------|
-| `NEXT_PUBLIC_API_URL` | Backend API base URL (default `http://localhost:8000`) |
+| `NEXT_PUBLIC_API_URL` | Backend API base URL (build arg; default `http://localhost:8000`) |
+| `NEXT_PUBLIC_MODEL_SERVER_URL` | Model server base URL (build arg; default `http://localhost:8001`) — used directly by the frontend for health, train status, and adapter listing |
 
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Update file line count to 1174; expand TypeScript interfaces to include TrainStatus, ModelHealth, OutputFile, Adapter; add failure_reason to Session; expand state variables table with all hooks; add NEXT_PUBLIC_MODEL_SERVER_URL to configuration | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Add retry logic to fetchQaItems (wait for QA data to be committed) | opencode |

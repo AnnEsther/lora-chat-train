@@ -4,7 +4,7 @@
 The training pipeline is an asynchronous Celery-based workflow that transforms a completed chat session into a fine-tuned LoRA adapter. It is split into two phases to allow a human QA review step between curation and training.
 
 ## Key Files
-- `worker/tasks.py` — All Celery task definitions (902 lines)
+- `worker/tasks.py` — All Celery task definitions (1008 lines)
 - `training/extractor/transcript_extractor.py` — Turn pair extraction + PII redaction
 - `training/curator/curator.py` — Multi-factor quality scoring and filtering
 - `training/datasets/dataset_writer.py` — JSONL SFTTrainer format writer
@@ -78,6 +78,7 @@ build_dataset
 - Input: validated Q&A + knowledge records
 - Runs `CorpusManager.merge()` — deduplicates across sessions by `(type, content[:100])` key
 - Persists `KnowledgeCorpus` entries
+- **Note:** This task is defined but is not wired into any of the three pipeline chains (`enqueue_phase1_pipeline`, `enqueue_phase2_pipeline`, `enqueue_training_pipeline`). It must be called manually if cross-session corpus merging is required.
 
 ### `build_dataset`
 - Input: included candidates from DB
@@ -86,14 +87,16 @@ build_dataset
 - Persists `Dataset` record to DB
 
 ### `launch_training`
-- Input: dataset S3 path
-- Calls `HFTrainingLauncher.launch()`:
+- Input: dataset info dict (S3 path, local path)
+- Calls `HFTrainingLauncher.build_config()` to assemble the full training config, then `HFTrainingLauncher.launch()`:
   - If `HF_TRAINING_ENDPOINT` is set: submits job to HuggingFace endpoint
-  - Otherwise: POSTs `{"run_id", "dataset_path"}` to local model server `/train`
+  - Otherwise: POSTs `{"run_id", "dataset_path"}` to local model server `/train`; returns `local_{run_id}` as job ID
 - Persists `TrainingRun` record with status `RUNNING`
+- Returns `{"local": True, ...}` in the chain result when using the local path (used by `poll_training` to skip polling)
 
 ### `poll_training`
-- Input: HF job ID
+- Input: previous task result dict containing `hf_job_id` and `local` flag
+- **Skipped** if `prev["local"] == True` (local model server training is fire-and-forget)
 - Polls HF endpoint every 60 s (up to 60 retries = 1 hour)
 - On success: downloads artifacts, uploads logs + adapter to S3
 - On timeout/failure: marks run `FAILED`
@@ -131,5 +134,6 @@ build_dataset
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Update line count; clarify launch_training config build and local-flag passthrough; note poll_training skips when local=True; note merge_corpus is not wired into any chain | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Add Slack notifications to extract_knowledge, synthesize_qa, validate_qa (knowledge_extracted, qa_synthesized, training_data_ready) | opencode |

@@ -477,6 +477,29 @@ async def mark_qa_validated(
     return {"status": "ok", "validated_count": count}
 
 
+@app.delete("/sessions/{session_id}/qa/{qa_id}")
+async def delete_qa(
+    session_id: uuid.UUID,
+    qa_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a synthesized Q&A entry."""
+    from models import SynthesizedQA
+
+    result = await db.execute(
+        select(SynthesizedQA).where(
+            SynthesizedQA.id == qa_id,
+            SynthesizedQA.session_id == session_id,
+        )
+    )
+    qa = result.scalar_one_or_none()
+    if not qa:
+        raise HTTPException(404, "Q&A not found")
+    await db.delete(qa)
+    await db.commit()
+    return {"status": "ok", "id": str(qa_id)}
+
+
 @app.post("/sessions/{session_id}/restart-training")
 async def restart_training(
     session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
@@ -597,6 +620,7 @@ async def health() -> dict:
 async def list_adapters() -> dict:
     """Proxy adapter list from model server which has the adapter_store volume."""
     import requests as req
+
     model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
     try:
         resp = req.get(f"{model_url}/adapters", timeout=5)
@@ -605,7 +629,12 @@ async def list_adapters() -> dict:
     except Exception as exc:
         logger.warning("adapters_proxy_error", extra={"error": str(exc)})
     # Fallback — base model only
-    return {"adapters": [{"id": "base", "version": "Base model", "path": "", "is_base": True}]}
+    return {
+        "adapters": [
+            {"id": "base", "version": "Base model", "path": "", "is_base": True}
+        ]
+    }
+
 
 # ── Outputs listing (used by diagnostic panel) ────────────────────────────────
 

@@ -62,18 +62,18 @@ Individual conversation messages.
 Index: `idx_turns_session(session_id, created_at)` — optimises history loading.
 
 ### `training_candidates`
-Extracted turn pairs from the extractor/curation pipeline.
+Extracted conversation segments from the extractor/curation pipeline.
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | UUID | PK |
 | `session_id` | UUID | FK → sessions |
-| `user_turn` | TEXT | |
-| `assistant_turn` | TEXT | |
-| `turn_index` | INT | Position in original transcript |
-| `score` | FLOAT | Composite quality score |
-| `included` | BOOL | Whether this pair passes the threshold |
+| `conversation` | JSONB | Full multi-turn segment `[{"role", "content"}, ...]` |
+| `quality_score` | FLOAT | Composite quality score (nullable until curated) |
+| `included` | BOOL | Whether this segment passes the threshold |
 | `rejection_reason` | TEXT | Nullable |
 | `created_at` | TIMESTAMPTZ | |
+
+Index: `idx_candidates_session(session_id)`
 
 ### `datasets`
 Built JSONL datasets.
@@ -91,15 +91,17 @@ HuggingFace training job records.
 |--------|------|-------|
 | `id` | UUID | PK |
 | `session_id` | UUID | FK → sessions |
-| `dataset_id` | UUID | FK → datasets |
+| `dataset_id` | UUID | FK → datasets (nullable) |
 | `status` | TEXT | CHECK: `PENDING\|RUNNING\|SUCCEEDED\|FAILED\|ROLLED_BACK` |
-| `hf_job_id` | TEXT | HF endpoint job identifier |
-| `eval_result` | JSON | Eval report dict |
-| `adapter_s3_path` | TEXT | |
-| `log_s3_path` | TEXT | |
-| `started_at` | TIMESTAMPTZ | |
-| `completed_at` | TIMESTAMPTZ | |
-| `metadata_` | JSON | Mapped as `metadata` column |
+| `hf_job_id` | TEXT | HF endpoint job identifier (nullable) |
+| `config` | JSONB | Full training config dict |
+| `logs_s3_path` | TEXT | Nullable |
+| `artifact_s3_path` | TEXT | Nullable |
+| `eval_s3_path` | TEXT | Nullable |
+| `eval_passed` | BOOL | Nullable — set after evaluation |
+| `started_at` | TIMESTAMPTZ | Nullable |
+| `finished_at` | TIMESTAMPTZ | Nullable |
+| `created_at` | TIMESTAMPTZ | |
 
 ### `model_versions`
 Deployed adapter versions.
@@ -120,9 +122,10 @@ Audit trail for all deployment actions.
 | `id` | UUID | PK |
 | `run_id` | UUID | FK → training_runs |
 | `event_type` | TEXT | CHECK: `PROMOTE\|ROLLBACK\|SMOKE_TEST_PASS\|SMOKE_TEST_FAIL` |
-| `version_tag` | TEXT | |
-| `notes` | TEXT | |
-| `occurred_at` | TIMESTAMPTZ | |
+| `from_version` | TEXT | Previous version tag (nullable) |
+| `to_version` | TEXT | New version tag (nullable) |
+| `reason` | TEXT | Human-readable reason (nullable) |
+| `created_at` | TIMESTAMPTZ | |
 
 ### `knowledge_records`
 Structured facts extracted from conversations.
@@ -175,5 +178,6 @@ Cross-session, deduplicated knowledge base.
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-08 | Fix training_candidates: replaced user_turn/assistant_turn/turn_index with conversation JSONB; fix training_runs: replaced eval_result/log_s3_path/completed_at/metadata_ with config/logs_s3_path/artifact_s3_path/eval_s3_path/eval_passed/finished_at; fix deployment_events: replaced version_tag/notes/occurred_at with from_version/to_version/reason/created_at | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Fix knowledge_records table (add topic, facts, source_turn_id), fix synthesized_qa (add edited, fix retry_count), fix knowledge_corpus (topic, facts, source_session_id) | opencode |
