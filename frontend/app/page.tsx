@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { HelpPanel } from "@/app/components/HelpPanel";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MODEL_SERVER_URL = process.env.NEXT_PUBLIC_MODEL_SERVER_URL ?? "http://localhost:8001";
@@ -1367,6 +1368,7 @@ export default function ChatPage() {
           </div>
         </div>
       )}
+      <HelpPanel />
     </div>
   );
 }
