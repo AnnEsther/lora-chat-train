@@ -474,6 +474,18 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
 
+  const fetchTurns = useCallback(async (sessionId: string) => {
+  try {
+    const resp = await fetch(`${API_URL}/sessions/${sessionId}/turns`);
+    if (!resp.ok) return;
+    const turns: { role: "user" | "assistant" | "system"; content: string }[] =
+      await resp.json();
+    if (turns.length > 0) {
+      setMessages(turns.map((t) => ({ role: t.role, content: t.content })));
+    }
+  } catch {}
+}, []);
+
   // ── Load sessions list ──
   const fetchSessions = useCallback(async () => {
     try {
@@ -498,6 +510,7 @@ export default function ChatPage() {
         const found = allSessions.find(s => s.id === savedId);
         if (found) {
           setSession(found);
+          await fetchTurns(found.id);
           return;
         }
       }
@@ -505,6 +518,7 @@ export default function ChatPage() {
       const target = allSessions.find(s => !["READY", "FAILED"].includes(s.state)) ?? allSessions[0];
       if (target) {
         setSession(target);
+        await fetchTurns(target.id);
       } else {
         // No sessions exist, create one
         await createSession();
@@ -886,7 +900,10 @@ export default function ChatPage() {
                 value={session?.id ?? ""}
                 onChange={async (e) => {
                   const s = sessions.find(s => s.id === e.target.value);
-                  if (s) setSession(s);
+                  if (s) {
+                    setSession(s);
+                    await fetchTurns(s.id);
+                  }
                 }}
                 className="text-xs px-2 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700"
               >

@@ -674,3 +674,8 @@ async def list_outputs() -> list[dict]:
 
     # Return most recent 30 files to keep the panel compact
     return files[-30:]
+
+@app.get("/sessions/{session_id}/turns")
+async def get_session_turns(session_id: uuid.UUID, db: AsyncSession = Depends(get_db),) -> list[dict]:
+    history = await _load_history(session_id, db)
+    return history
