@@ -296,7 +296,8 @@ if docker compose ps --quiet 2>/dev/null | grep -q .; then
 fi
 
 info "Building and starting all services..."
-docker compose up --build -d
+docker compose build --no-cache --parallel 1
+docker compose up -d
 
 ok "All containers started"
 
