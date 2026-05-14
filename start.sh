@@ -264,6 +264,27 @@ sudo systemctl enable nginx &>/dev/null
 ok "Nginx enabled on boot"
 
 # =============================================================================
+# SECTION 5.5 — ALWAYS: Free up disk space before build
+# =============================================================================
+header "Disk cleanup"
+
+DISK_FREE=$(df / | awk 'NR==2 {print $4}')
+DISK_FREE_GB=$(( DISK_FREE / 1024 / 1024 ))
+
+info "Free disk space: ${DISK_FREE_GB}GB"
+
+if [ "$DISK_FREE_GB" -lt 5 ]; then
+  warn "Low disk space — pruning Docker cache..."
+  docker system prune -f
+  docker builder prune -f
+  DISK_FREE_AFTER=$(df / | awk 'NR==2 {print $4}')
+  DISK_FREE_AFTER_GB=$(( DISK_FREE_AFTER / 1024 / 1024 ))
+  ok "Disk space after cleanup: ${DISK_FREE_AFTER_GB}GB"
+else
+  ok "Disk space OK (${DISK_FREE_GB}GB free)"
+fi
+
+# =============================================================================
 # SECTION 6 — ALWAYS: Build and start Docker services
 # =============================================================================
 header "Starting Docker services"
