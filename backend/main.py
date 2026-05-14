@@ -20,7 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -43,6 +43,8 @@ from shared.slack_notifier import (
     session_sleeping,
     insufficient_data_warning,
 )
+
+import json                          # already imported in most places, verify it's there
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,7 +69,9 @@ app = FastAPI(title="LoRA Chat & Train", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000",
+                   os.environ.get("EXTERNAL_SITE_ORIGIN", "")
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -679,3 +683,82 @@ async def list_outputs() -> list[dict]:
 async def get_session_turns(session_id: uuid.UUID, db: AsyncSession = Depends(get_db),) -> list[dict]:
     history = await _load_history(session_id, db)
     return history
+
+# ── Glyph Chat API ─────────────────────────────────────────────────────────────
+
+class DirectChatRequest(BaseModel):
+    message: str
+    adapter_id: str = "base"
+    history: list[dict] = []   # [{"role": "user/assistant", "content": "..."}]
+
+
+async def _verify_api_key(x_api_key: str = Header(...)):
+    api_key = os.environ.get("CHAT_API_KEY", "")
+    if not api_key or x_api_key != api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+@app.get("/adapters/public", dependencies=[Depends(_verify_api_key)])
+async def list_adapters_public() -> dict:
+    """
+    Return available adapters for Glyph Chat to populate its selector.
+    Proxies directly to the model server's /adapters endpoint.
+    """
+    import httpx
+    model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{model_url}/adapters")
+            if resp.is_success:
+                return resp.json()
+    except Exception as exc:
+        logger.warning("adapters_public_fetch_failed", extra={"error": str(exc)})
+    return {
+        "adapters": [{"id": "base", "version": "Base model", "path": "", "is_base": True}]
+    }
+
+
+@app.post("/chat/direct", dependencies=[Depends(_verify_api_key)])
+async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
+    """
+    Stateless streaming chat for Glyph Chat.
+    No session created, no token budget, no training trigger.
+    """
+    # Load the requested adapter if it isn't the base
+    if request.adapter_id and request.adapter_id != "base":
+        import requests as req
+        model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+        try:
+            adapters_resp = req.get(f"{model_url}/adapters", timeout=5)
+            if adapters_resp.ok:
+                adapters = adapters_resp.json().get("adapters", [])
+                selected = next(
+                    (a for a in adapters if a["id"] == request.adapter_id), None
+                )
+                if selected and selected.get("path"):
+                    req.post(
+                        f"{model_url}/reload_adapter",
+                        json={"adapter_dir": selected["path"]},
+                        timeout=30,
+                    )
+        except Exception as exc:
+            logger.warning("direct_chat_adapter_load_failed", extra={"error": str(exc)})
+
+    messages = request.history + [{"role": "user", "content": request.message}]
+    model_client: ModelClient = app.state.model_client
+
+    async def stream_gen():
+        try:
+            async for chunk in model_client.stream(messages):
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+        except Exception as exc:
+            logger.error("direct_chat_stream_error", extra={"error": str(exc)})
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        finally:
+            yield f"data: {json.dumps({'type': 'end'})}\n\n"
+
+    return StreamingResponse(
+        stream_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
