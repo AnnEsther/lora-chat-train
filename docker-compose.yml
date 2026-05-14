@@ -96,6 +96,17 @@ services:
               capabilities: ["gpu"]
     restart: unless-stopped
     command: python -m model_server.serve
+  # ── Glyph Chat ──────────────────────────────────────────────────────────────
+  glyph_chat:
+    build:
+      context: ./glyph_chat
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_API_KEY: ${NEXT_PUBLIC_API_KEY}
+    ports:
+      - "3001:80"
+    restart: unless-stopped
   # ── Frontend ────────────────────────────────────────────────────────────────
   frontend:
     build:

@@ -13,6 +13,15 @@ server {
         proxy_cache_bypass $http_upgrade;
     }
 
+    # Glyph Chat — static export served from nginx container on port 3001
+    location /glyph {
+        auth_basic "Restricted";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://localhost:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     # Backend API + SSE streaming
     location /api/ {
         rewrite ^/api(/.*)$ $1 break;
