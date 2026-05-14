@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY worker/requirements.txt ./worker-requirements.txt
-RUN pip install --no-cache-dir -r worker-requirements.txt
+# COPY worker/requirements.txt ./worker-requirements.txt
+# RUN pip install --no-cache-dir -r worker-requirements.txt
 
 COPY backend/. .
 COPY worker/ ./worker/
