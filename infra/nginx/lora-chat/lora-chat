@@ -1,0 +1,66 @@
+server {
+    server_name train.anratelier.com;
+
+    # Frontend
+    location / {
+        auth_basic "Restricted";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+
+    # Backend API + SSE streaming
+    location /api/ {
+        rewrite ^/api(/.*)$ $1 break;
+        proxy_pass http://localhost:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;        # required for SSE
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+
+	add_header 'Access-Control-Allow-Origin' $http_origin always;
+	add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
+	add_header 'Access-Control-Allow-Headers' 'Content-Type, X-Api-Key' always;
+
+	 if ($request_method = 'OPTIONS') {
+		add_header 'Access-Control-Allow-Origin' $http_origin;
+		add_header 'Access-Control-Max-Age' 1728000;
+		add_header 'Content-Length' 0;
+		return 204;
+	}
+    }
+
+    location /model/ {
+        rewrite ^/model(/.*)$ $1 break;
+        proxy_pass http://localhost:8001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    listen 443 ssl; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/train.anratelier.com/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/train.anratelier.com/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+
+}
+server {
+    if ($host = train.anratelier.com) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+
+    listen 80;
+    server_name train.anratelier.com;
+    return 404; # managed by Certbot
+
+
+}
