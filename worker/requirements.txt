@@ -23,6 +23,8 @@ httpx==0.27.2
 # Shared utilities
 python-dotenv==1.0.1
 
+psycopg2-binary==2.9.9
+
 # ML dependencies for local LoRA training on T4 GPU
 torch==2.4.1
 transformers==4.45.2
