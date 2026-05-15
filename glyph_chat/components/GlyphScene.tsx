@@ -10,6 +10,9 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 
 const SCALE = 0.45;
 
+// Prefix asset paths with basePath so they resolve correctly under /glyph in production
+const BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+
 interface GlyphModelProps {
   onSpun: () => void;
   chatOpen: boolean;
@@ -35,8 +38,8 @@ function GlyphModel({ onSpun, chatOpen }: GlyphModelProps) {
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const groupRef = useRef<THREE.Group>(null);
 
-  const materials = useLoader(MTLLoader, '/assets/Glyph_B_Baking.mtl');
-  const obj = useLoader(OBJLoader, '/assets/Glyph_B_Baking.obj', (loader) => {
+  const materials = useLoader(MTLLoader, `${BASE}/assets/Glyph_B_Baking.mtl`);
+  const obj = useLoader(OBJLoader, `${BASE}/assets/Glyph_B_Baking.obj`, (loader) => {
     materials.preload();
     (loader as OBJLoader).setMaterials(materials);
   });
