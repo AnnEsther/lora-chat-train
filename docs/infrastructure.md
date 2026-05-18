@@ -58,15 +58,18 @@ The application is containerised with Docker Compose. Six services cover the ful
 |--------|---------|---------|
 | `postgres_data` | postgres | Persistent database storage |
 | `adapter_store` | model_server, worker | Persistent LoRA adapter storage; shared so the worker can write new adapters and the model server can hot-swap them |
+| `hf_cache` | model_server, worker | Persistent HuggingFace model cache (`~/.cache/huggingface`); prevents re-downloading the base model (~2.4 GB) on every container restart |
 
 ## Makefile Commands
 | Command | Description |
 |---------|-------------|
-| `make up` | `docker compose up --build` — build and start all services |
+| `make up` | `docker compose up -d` — start all services (no rebuild) |
+| `make build` | `docker compose build` — rebuild images using layer cache |
 | `make down` | `docker compose down` — stop all services |
 | `make db` | Start only `postgres` + `redis` |
 | `make init-db` | Run `scripts/init_db.py` to apply schema |
 | `make reset-all` | Run `scripts/reset_all.py` — wipe all DB data + clear adapter/output files |
+| `make prune` | Remove dangling images, stale build cache, and stopped containers |
 | `make backend` | Start FastAPI backend locally (no Docker) |
 | `make worker` | Start Celery worker locally (no Docker) |
 | `make frontend` | Start Next.js dev server locally |
@@ -121,3 +124,4 @@ For CPU-only or cloud deployment: use `backend/model_server/serve.py` instead an
 |------|--------|--------|
 | 2026-05-08 | Fix worker concurrency to 1; fix model_server Dockerfile to Dockerfile.model.gpu; note adapter_store shared with worker; add reset-all to Makefile table; expand env vars table with HF_ENDPOINT_URL, HF_TRAINING_ENDPOINT, AWS_REGION, LOCAL_OUTPUT_DIR, NEXT_PUBLIC_MODEL_SERVER_URL | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
+| 2026-05-15 | Disk space optimisations: remove --no-cache from start.sh builds; always prune dangling images + build cache before build (not only below 5 GB); add hf_cache named volume to persist HF model weights across restarts; add .dockerignore files for all services; split Makefile up/build targets; add make prune target | opencode |

@@ -63,6 +63,7 @@ services:
       - ./outputs:/app/outputs
       - ./backend:/app/backend
       - adapter_store:/adapters
+      - hf_cache:/root/.cache/huggingface
     deploy:
       resources:
         reservations:
@@ -83,6 +84,7 @@ services:
     volumes:
       - adapter_store:/adapters
       - ./outputs:/app/outputs
+      - hf_cache:/root/.cache/huggingface
     environment:
       LOCAL_OUTPUT_DIR: /app/outputs
       ADAPTER_DIR: /adapters/current
@@ -128,3 +130,4 @@ services:
 volumes:
   postgres_data:
   adapter_store:
+  hf_cache:

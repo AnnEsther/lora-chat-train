@@ -8,8 +8,8 @@ cd backend
 pip install -r requirements.txt
 cd ..
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
-()Test it's alive:
-curl http://localhost:8000/health
+()Test it's alive (replace with your EC2 public IP or domain):
+curl http://your-ec2-public-ip:8000/health
 # {"status":"ok"}
 ()Run the Celery worker
 cd worker
@@ -71,7 +71,8 @@ START UP
 1
     docker compose up -d postgres redis
 2
-    python backend/model_server/local_gpu_serve.py
+    python backend/model_server/hf_serve.py
+    # python backend/model_server/local_gpu_serve.py
 3
     uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload --env-file .env
 #    python.exe -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
@@ -99,3 +100,9 @@ docker compose build --no-cache worker && docker compose up -d worker
 
 
 icacls "outputs" /grant Everyone:(OI)(CI)F /T
+
+
+in server 
+
+chmod +x start.sh
+./start.sh

@@ -1,13 +1,15 @@
-.PHONY: help up down db worker backend frontend test lint clean reset-all
+.PHONY: help up build down db worker backend frontend test lint clean prune reset-all
 
 help:
 	@echo "LoRA Chat & Train — development commands"
 	@echo ""
-	@echo "  make up          Start all services via docker compose"
+	@echo "  make up          Start all services (no rebuild)"
+	@echo "  make build       Rebuild Docker images (uses layer cache)"
 	@echo "  make down        Stop all services"
 	@echo "  make db          Start only postgres + redis"
 	@echo "  make init-db     Initialise the database schema"
 	@echo "  make reset-all   Clear all sessions and adapters (start fresh)"
+	@echo "  make prune       Remove dangling images and stale build cache"
 	@echo "  make backend     Start FastAPI backend (local, no Docker)"
 	@echo "  make worker      Start Celery worker (local, no Docker)"
 	@echo "  make frontend    Start Next.js frontend (local)"
@@ -16,10 +18,18 @@ help:
 	@echo "  make clean       Remove __pycache__ directories"
 
 up:
-	docker compose up --build
+	docker compose up -d
+
+build:
+	docker compose build
 
 down:
 	docker compose down
+
+prune:
+	docker image prune -f
+	docker builder prune -f
+	docker container prune -f
 
 db:
 	docker compose up -d postgres redis

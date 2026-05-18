@@ -1,0 +1,8 @@
+# Dependencies and build output — reinstalled/rebuilt inside container
+node_modules/
+.next/
+
+# Secrets
+.env
+.env.local
+.env*.local

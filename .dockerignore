@@ -1,0 +1,29 @@
+# Git history
+.git/
+.gitignore
+
+# Python virtualenv and cache
+.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.ruff_cache/
+
+# Node modules and build output
+frontend/node_modules/
+frontend/.next/
+glyph_chat/node_modules/
+glyph_chat/.next/
+
+# Runtime artifacts (bind-mounted at runtime, not needed in image)
+outputs/
+adapters/
+
+# Secrets and local config
+.env
+*.pem
+
+# Docs and non-runtime files
+docs/
+*.md
+setup.txt

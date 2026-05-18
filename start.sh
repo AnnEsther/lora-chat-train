@@ -270,18 +270,26 @@ header "Disk cleanup"
 
 DISK_FREE=$(df / | awk 'NR==2 {print $4}')
 DISK_FREE_GB=$(( DISK_FREE / 1024 / 1024 ))
+info "Free disk space before cleanup: ${DISK_FREE_GB}GB"
 
-info "Free disk space: ${DISK_FREE_GB}GB"
+# Always prune dangling images and stale build cache — safe because dangling
+# images are by definition not referenced by any container or tag.
+info "Pruning dangling Docker images and stale build cache..."
+docker image prune -f
+docker builder prune -f
 
-if [ "$DISK_FREE_GB" -lt 5 ]; then
-  warn "Low disk space — pruning Docker cache..."
+DISK_FREE_AFTER=$(df / | awk 'NR==2 {print $4}')
+DISK_FREE_AFTER_GB=$(( DISK_FREE_AFTER / 1024 / 1024 ))
+ok "Disk space after cleanup: ${DISK_FREE_AFTER_GB}GB free"
+
+# If still critically low, do a full system prune (removes stopped containers
+# and unused networks too — does NOT remove named volumes).
+if [ "$DISK_FREE_AFTER_GB" -lt 5 ]; then
+  warn "Still low on disk (${DISK_FREE_AFTER_GB}GB) — running full system prune..."
   docker system prune -f
-  docker builder prune -f
-  DISK_FREE_AFTER=$(df / | awk 'NR==2 {print $4}')
-  DISK_FREE_AFTER_GB=$(( DISK_FREE_AFTER / 1024 / 1024 ))
-  ok "Disk space after cleanup: ${DISK_FREE_AFTER_GB}GB"
-else
-  ok "Disk space OK (${DISK_FREE_GB}GB free)"
+  DISK_FREE_FINAL=$(df / | awk 'NR==2 {print $4}')
+  DISK_FREE_FINAL_GB=$(( DISK_FREE_FINAL / 1024 / 1024 ))
+  ok "Disk space after full prune: ${DISK_FREE_FINAL_GB}GB free"
 fi
 
 # =============================================================================
@@ -296,11 +304,11 @@ if docker compose ps --quiet 2>/dev/null | grep -q .; then
 fi
 
 info "Building and starting all services..."
-docker compose build --no-cache backend
-docker compose build --no-cache worker
-docker compose build --no-cache model_server
-docker compose build --no-cache frontend
-docker compose build --no-cache glyph_chat
+docker compose build backend
+docker compose build worker
+docker compose build model_server
+docker compose build frontend
+docker compose build glyph_chat
 docker compose up -d
 
 ok "All containers started"

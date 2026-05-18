@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Secrets
+.env
+
+# Test dependencies and files
+tests/
+requirements.test.txt
