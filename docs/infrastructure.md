@@ -46,7 +46,8 @@ The application is containerised with Docker Compose. Six services cover the ful
 - **GPU reservation:** `capabilities: [gpu]` — requires NVIDIA container toolkit
 - Named volume `adapter_store` mounted at `/adapters` (shared with worker; persists adapter files across container restarts)
 - Also mounts `outputs/` directory
-- Runs `backend/model_server/serve.py` (Docker/production); swap to `local_gpu_serve.py` for local RTX 4060 dev or `hf_serve.py` for HF-hosted inference
+- Runs `backend/model_server/local_gpu_serve.py` — loads the base model into GPU VRAM, handles streaming inference, LoRA training, and adapter hot-swap
+- `serve.py` has been removed (was an old incomplete stub); `hf_serve.py` is the alternative for HF-hosted inference only
 
 ### `frontend`
 - Built from `./frontend/Dockerfile`
@@ -99,8 +100,9 @@ All services read from `.env` (see `.env.example`).
 | `PRE_SLEEP_THRESHOLD` | Warning threshold in remaining tokens (default `512`) |
 | `MIN_TRAINING_SAMPLES` | Minimum curated samples to start training (default `10`) |
 | `LOCAL_OUTPUT_DIR` | Override for local artifact storage directory (default `<project_root>/outputs/`) |
-| `NEXT_PUBLIC_API_URL` | Frontend: backend API base URL (build arg; default `http://localhost:8000`) |
-| `NEXT_PUBLIC_MODEL_SERVER_URL` | Frontend: model server base URL (build arg; default `http://localhost:8001`) |
+| `NEXT_PUBLIC_API_URL` | Frontend: backend API base URL baked in at build time. For EC2+nginx: `https://train.yourdomain.com/api` |
+| `NEXT_PUBLIC_MODEL_SERVER_URL` | Frontend: model server base URL baked in at build time. For EC2+nginx: `https://train.yourdomain.com/model` |
+| `EXTERNAL_SITE_ORIGIN` | Public-facing frontend origin added to backend CORS `allow_origins`. **Required for EC2** (e.g. `https://train.yourdomain.com`) |
 
 ## GPU Requirements
 The model server requires an NVIDIA GPU with CUDA support. Tested on RTX 4060 (8 GB VRAM) with:
@@ -108,7 +110,7 @@ The model server requires an NVIDIA GPU with CUDA support. Tested on RTX 4060 (8
 - bf16 compute dtype
 - `device_map="auto"` for automatic layer distribution
 
-For CPU-only or cloud deployment: use `backend/model_server/serve.py` instead and remove the GPU reservation from `docker-compose.yml`.
+For HF-hosted inference (no local GPU): use `backend/model_server/hf_serve.py` with `Dockerfile.model` and remove the GPU reservation from `docker-compose.yml`.
 
 ## Developer Scripts
 | Script | Description |
@@ -125,3 +127,4 @@ For CPU-only or cloud deployment: use `backend/model_server/serve.py` instead an
 | 2026-05-08 | Fix worker concurrency to 1; fix model_server Dockerfile to Dockerfile.model.gpu; note adapter_store shared with worker; add reset-all to Makefile table; expand env vars table with HF_ENDPOINT_URL, HF_TRAINING_ENDPOINT, AWS_REGION, LOCAL_OUTPUT_DIR, NEXT_PUBLIC_MODEL_SERVER_URL | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-15 | Disk space optimisations: remove --no-cache from start.sh builds; always prune dangling images + build cache before build (not only below 5 GB); add hf_cache named volume to persist HF model weights across restarts; add .dockerignore files for all services; split Makefile up/build targets; add make prune target | opencode |
+| 2026-05-18 | Fix 502 errors on EC2: (1) change model_server docker-compose command from serve.py to local_gpu_serve.py; (2) delete old incomplete serve.py; (3) add requirements.worker-slim.txt and install it in backend Dockerfile so worker.tasks imports succeed; (4) add EXTERNAL_SITE_ORIGIN to .env.example and start.sh REQUIRED_VARS to fix CORS for production domain | opencode |

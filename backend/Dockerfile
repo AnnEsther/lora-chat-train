@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# COPY worker/requirements.txt ./worker-requirements.txt
-# RUN pip install --no-cache-dir -r worker-requirements.txt
+# Slim worker deps — only what's needed for `from worker.tasks import ...`
+# to succeed at import time (no ML packages).
+COPY backend/requirements.worker-slim.txt .
+RUN pip install --no-cache-dir -r requirements.worker-slim.txt
 
 COPY backend/. .
 COPY worker/ ./worker/

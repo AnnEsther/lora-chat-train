@@ -97,7 +97,7 @@ services:
               count: 1
               capabilities: ["gpu"]
     restart: unless-stopped
-    command: python -m model_server.serve
+    command: python -m model_server.local_gpu_serve
   # ── Glyph Chat ──────────────────────────────────────────────────────────────
   glyph_chat:
     build:

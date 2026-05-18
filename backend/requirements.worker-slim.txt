@@ -1,0 +1,12 @@
+# Slim worker dependencies installed into the backend image.
+# Only the packages needed so that `from worker.tasks import ...` succeeds
+# at import time inside the backend container.
+# Heavy ML packages (torch, transformers, etc.) are NOT included here —
+# those live in the worker container only (worker/requirements.txt).
+
+celery==5.4.0
+redis==5.1.1
+kombu==5.3.4
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
