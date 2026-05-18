@@ -1,21 +1,22 @@
-.PHONY: help up build down db worker backend frontend test lint clean prune reset-all
+.PHONY: help up build build-model down db worker backend frontend test lint clean prune reset-all
 
 help:
 	@echo "LoRA Chat & Train — development commands"
 	@echo ""
-	@echo "  make up          Start all services (no rebuild)"
-	@echo "  make build       Rebuild Docker images (uses layer cache)"
-	@echo "  make down        Stop all services"
-	@echo "  make db          Start only postgres + redis"
-	@echo "  make init-db     Initialise the database schema"
-	@echo "  make reset-all   Clear all sessions and adapters (start fresh)"
-	@echo "  make prune       Remove dangling images and stale build cache"
-	@echo "  make backend     Start FastAPI backend (local, no Docker)"
-	@echo "  make worker      Start Celery worker (local, no Docker)"
-	@echo "  make frontend    Start Next.js frontend (local)"
-	@echo "  make test        Run pytest unit tests"
-	@echo "  make lint        Run ruff linter over Python code"
-	@echo "  make clean       Remove __pycache__ directories"
+	@echo "  make up           Start all services (no rebuild)"
+	@echo "  make build        Rebuild all Docker images (uses layer cache)"
+	@echo "  make build-model  Rebuild only the model_server image"
+	@echo "  make down         Stop all services"
+	@echo "  make db           Start only postgres + redis"
+	@echo "  make init-db      Initialise the database schema"
+	@echo "  make reset-all    Clear all sessions and adapters (start fresh)"
+	@echo "  make prune        Remove ALL unused images + build cache (frees disk)"
+	@echo "  make backend      Start FastAPI backend (local, no Docker)"
+	@echo "  make worker       Start Celery worker (local, no Docker)"
+	@echo "  make frontend     Start Next.js frontend (local)"
+	@echo "  make test         Run pytest unit tests"
+	@echo "  make lint         Run ruff linter over Python code"
+	@echo "  make clean        Remove __pycache__ directories"
 
 up:
 	docker compose up -d
@@ -23,13 +24,18 @@ up:
 build:
 	docker compose build
 
+build-model:
+	docker compose build model_server
+
 down:
 	docker compose down
 
 prune:
-	docker image prune -f
-	docker builder prune -f
+	@echo "Pruning unused Docker images, build cache, and stopped containers..."
+	docker image prune -a -f
+	docker builder prune -a -f
 	docker container prune -f
+	@echo "Done. Run 'df -h /' to check disk usage."
 
 db:
 	docker compose up -d postgres redis
