@@ -78,6 +78,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.model.gpu
+      args:
+        HF_TOKEN: ${HF_TOKEN}
+        BASE_MODEL: ${BASE_MODEL:-meta-llama/Llama-3.2-1B-Instruct}
     <<: *common-env
     ports:
       - "8001:8001"

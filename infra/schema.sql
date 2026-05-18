@@ -130,15 +130,20 @@ CREATE TABLE IF NOT EXISTS synthesized_qa (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id          UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     knowledge_record_id UUID REFERENCES knowledge_records(id) ON DELETE SET NULL,
+    source_turn_id      UUID REFERENCES turns(id) ON DELETE SET NULL,
     question            TEXT NOT NULL,
     answer              TEXT NOT NULL,
     validated           BOOLEAN NOT NULL DEFAULT FALSE,
     edited              BOOLEAN NOT NULL DEFAULT FALSE,
     retry_count         INTEGER NOT NULL DEFAULT 0,
     validation_notes    TEXT,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_synthesized_qa_session ON synthesized_qa(session_id);
+CREATE INDEX IF NOT EXISTS idx_synthesized_qa_turn ON synthesized_qa(source_turn_id);
+
+-- Migration: add source_turn_id if upgrading an existing database
+ALTER TABLE synthesized_qa ADD COLUMN IF NOT EXISTS source_turn_id UUID REFERENCES turns(id) ON DELETE SET NULL;
 
 -- ── Knowledge corpus (merged from sessions) ──────────────────────────────────
 CREATE TABLE IF NOT EXISTS knowledge_corpus (

@@ -61,6 +61,16 @@ class TrainingRunResponse(BaseModel):
     finished_at: Optional[datetime] = None
 
 
+# ── QA count schema ──────────────────────────────────────────────────────────
+
+
+class QACountResponse(BaseModel):
+    total_count: int
+    validated_count: int
+    min_required: int
+    ready_to_train: bool
+
+
 # ── Model version schemas ─────────────────────────────────────────────────────
 
 

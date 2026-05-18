@@ -175,3 +175,4 @@ Sections:
 | 2026-05-08 | Update file line count to 1174; expand TypeScript interfaces to include TrainStatus, ModelHealth, OutputFile, Adapter; add failure_reason to Session; expand state variables table with all hooks; add NEXT_PUBLIC_MODEL_SERVER_URL to configuration | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Add retry logic to fetchQaItems (wait for QA data to be committed) | opencode |
+| 2026-05-18 | Major redesign: replace QA review modal with inline QACard components rendered below each user message; remove "Review Training Data" button; add Start Training button (disabled until MIN_TRAINING_SAMPLES validated pairs); add qaCount state and fetchQaCount(); add DiagnosticPanel training data section; update HelpPanel steps. QA pairs are now attached to messages via source_turn_id — /turns endpoint returns qa_pairs per turn for page reload hydration. | opencode |

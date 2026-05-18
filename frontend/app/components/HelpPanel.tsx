@@ -17,42 +17,42 @@ interface Step {
 const STEPS: Step[] = [
   {
     number: 1,
-    title: "End your chat session",
+    title: "Send a passage",
     description:
-      "When you're done chatting, type /sleep to trigger training immediately.",
-    code: "/sleep",
-    note: "If you don't type /sleep, training will start automatically once the token budget runs out.",
+      "Paste any text you want the model to learn from and press Send. The system will automatically generate Q&A training pairs from it.",
+    note: "You can send as many passages as you like — each one adds more training data.",
   },
   {
     number: 2,
-    title: "Wait for training data",
+    title: "Review Q&A pairs inline",
     description:
-      "The system processes your conversation and generates Q&A training data. Once ready, you'll get a notification in the",
-    note: "lora-chat-train channel on Mattermost.",
+      "Generated Q&A cards appear directly below each passage in the chat. Edit the question or answer text, then click Save changes.",
   },
   {
     number: 3,
-    title: "Review training data",
+    title: "Validate pairs",
     description:
-      'Click "Review Training Data" to see all Q&A pairs from your session. Edit or delete any entries as needed before approving.',
+      'Click "Mark validated" on each Q&A card you are happy with. Validated pairs count toward the training threshold shown in the Start Training button.',
   },
   {
     number: 4,
-    title: "Validate & start training",
+    title: "Start Training",
     description:
-      'Once everything looks good, click "Validate All & Start Training". Progress notifications will appear in the Mattermost channel.',
+      'Once you have enough validated pairs the "Start Training" button in the header turns green. Click it to begin fine-tuning.',
+    note: "You can also type /sleep to immediately start training using all current Q&A pairs.",
+    code: "/sleep",
   },
   {
     number: 5,
     title: "Test the new adapter",
     description:
-      "When training finishes, the new adapter will appear in the session selector. Start a new session with it and ask a few questions to verify.",
+      "When training finishes, the new adapter appears in the New Session dropdown. Start a new session with it and verify the results.",
   },
   {
     number: 6,
     title: "Repeat",
     description:
-      "Start a new session to begin the next training cycle. Each session builds on the last.",
+      "Start a new session and send more passages to keep improving the model. Each cycle builds on the last.",
   },
 ];
 
@@ -131,7 +131,7 @@ export function HelpPanel() {
           {/* Footer */}
           <div className="px-4 py-2.5 border-t border-gray-100 bg-gray-50 flex-shrink-0">
             <p className="text-xs text-gray-400 text-center">
-              Chat → <code className="font-mono">/sleep</code> → review → validate → train → test → repeat
+              Send passages → review Q&A → validate → <code className="font-mono">Start Training</code> → test → repeat
             </p>
           </div>
         </div>

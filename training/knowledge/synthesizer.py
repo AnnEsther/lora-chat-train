@@ -17,6 +17,8 @@ MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001"
 BATCH_SIZE = int(os.environ.get("QA_BATCH_SIZE", "5"))  # facts per model call
 MAX_RETRIES = 2
 CALL_TIMEOUT = int(os.environ.get("QA_SYNTHESIS_TIMEOUT", "60"))
+# Per-item token budget for single-passage synthesis (question + answer, batch=1)
+PASSAGE_MAX_TOKENS = int(os.environ.get("QA_PASSAGE_MAX_TOKENS", "400"))
 
 
 @dataclass
@@ -27,7 +29,6 @@ class SynthesizedQA:
 
 
 class QASynthesizer:
-
     def synthesize(
         self,
         knowledge_records: list[dict[str, Any]],
@@ -45,32 +46,44 @@ class QASynthesizer:
                 if fact.get("content") or fact.get("answer"):
                     flat_facts.append((fact, topic))
 
-        logger.info("synthesis_start", extra={
-            "facts": len(flat_facts),
-            "batches": -(-len(flat_facts) // BATCH_SIZE),  # ceiling div
-        })
+        logger.info(
+            "synthesis_start",
+            extra={
+                "facts": len(flat_facts),
+                "batches": -(-len(flat_facts) // BATCH_SIZE),  # ceiling div
+            },
+        )
 
         all_qa: list[SynthesizedQA] = []
 
         # Process in batches — each batch = one model call
         for i in range(0, len(flat_facts), BATCH_SIZE):
-            batch = flat_facts[i: i + BATCH_SIZE]
+            batch = flat_facts[i : i + BATCH_SIZE]
             try:
                 pairs = self._synthesize_batch(batch, system_prompt)
                 all_qa.extend(pairs)
-                logger.info("batch_done", extra={
-                    "batch": i // BATCH_SIZE + 1,
-                    "qa_pairs": len(pairs),
-                })
+                logger.info(
+                    "batch_done",
+                    extra={
+                        "batch": i // BATCH_SIZE + 1,
+                        "qa_pairs": len(pairs),
+                    },
+                )
             except Exception as e:
-                logger.warning(f"Batch {i // BATCH_SIZE + 1} failed, using fallback: {e}")
+                logger.warning(
+                    f"Batch {i // BATCH_SIZE + 1} failed, using fallback: {e}"
+                )
                 # Fallback for this batch only — don't lose the whole run
                 all_qa.extend(self._fallback_batch(batch))
 
         logger.info("synthesis_complete", extra={"total_qa": len(all_qa)})
         return all_qa
 
-    def _synthesize_batch( self, batch: list[tuple[dict, str]], system_prompt: Optional[str], ) -> list[SynthesizedQA]:
+    def _synthesize_batch(
+        self,
+        batch: list[tuple[dict, str]],
+        system_prompt: Optional[str],
+    ) -> list[SynthesizedQA]:
         """
         The user is the TEACHER. The LLM is the STUDENT.
         We want to generate training examples where:
@@ -100,7 +113,7 @@ class QASynthesizer:
 
         facts_block = "\n\n".join(fact_lines)
 
-         # Tight, unambiguous prompt — Llama responds well to this format
+        # Tight, unambiguous prompt — Llama responds well to this format
         prompt = f"""Generate training data for a student-teacher AI conversation.
 The student (AI) asks questions. The teacher (human) shares knowledge.
 
@@ -131,18 +144,24 @@ Output ONLY valid JSON, nothing else:
                 )
                 if resp.ok:
                     return resp.json().get("response", resp.json().get("text", ""))
-                logger.warning(f"Model returned {resp.status_code}, attempt {attempt + 1}")
+                logger.warning(
+                    f"Model returned {resp.status_code}, attempt {attempt + 1}"
+                )
             except requests.RequestException as e:
                 logger.warning(f"Model call attempt {attempt + 1} failed: {e}")
 
         raise Exception(f"Model server failed after {MAX_RETRIES} attempts")
 
-    def _parse_batch_response( self, response: str, batch: list[tuple[dict, str]], ) -> list[SynthesizedQA]:
+    def _parse_batch_response(
+        self,
+        response: str,
+        batch: list[tuple[dict, str]],
+    ) -> list[SynthesizedQA]:
         """Parse the JSON array response, fall back per-item if needed."""
-        
+
         # Log first 300 chars so we can see what the model returned
         logger.info("model_response_preview", extra={"preview": response[:300]})
-    
+
         # Strip markdown fences if model wrapped output
         clean = re.sub(r"```(?:json)?|```", "", response).strip()
 
@@ -153,18 +172,18 @@ Output ONLY valid JSON, nothing else:
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parse failed: {e}, using fallback")
             pass
-        
+
         # Find the JSON array (model sometimes adds preamble text)
         array_match = re.search(r"\[.*\]", clean, re.DOTALL)
         if array_match:
-            try :
+            try:
                 items = json.loads(array_match.group())
                 if isinstance(items, list):
                     return self._items_to_qa(items, batch)
             except json.JSONDecodeError as e:
                 logger.warning(f"JSON parse failed: {e}, using fallback")
                 pass
-        
+
         objects = re.findall(
             r'\{[^{}]*"question"\s*:\s*"[^"]+?"[^{}]*"answer"\s*:\s*"[^"]+?"[^{}]*\}',
             clean,
@@ -179,8 +198,10 @@ Output ONLY valid JSON, nothing else:
 
         logger.warning("all_json_parse_attempts_failed", extra={"preview": clean[:300]})
         return self._fallback_batch(batch)
-    
-    def _items_to_qa(self, items: list[dict[str, Any]], batch: list[tuple[dict, str]]) -> list[SynthesizedQA]:
+
+    def _items_to_qa(
+        self, items: list[dict[str, Any]], batch: list[tuple[dict, str]]
+    ) -> list[SynthesizedQA]:
         """Convert parsed JSON items to SynthesizedQA, falling back per missing item."""
         qa_pairs = []
         for i, (fact, topic) in enumerate(batch):
@@ -189,7 +210,9 @@ Output ONLY valid JSON, nothing else:
                 q = str(item.get("question", "")).strip()
                 a = str(item.get("answer", "")).strip()
                 if q and a and len(q) > 5 and len(a) > 5:
-                    qa_pairs.append(SynthesizedQA(question=q, answer=a, source_fact=fact))
+                    qa_pairs.append(
+                        SynthesizedQA(question=q, answer=a, source_fact=fact)
+                    )
                     continue
             qa_pairs.extend(self._fallback_single(fact, topic))
         return qa_pairs
@@ -205,7 +228,7 @@ Output ONLY valid JSON, nothing else:
         """Fallback without model — correct roles: LLM asks, user answers."""
         if fact.get("type") == "qa_pair":
             q = fact.get("question", "").strip()  # LLM's question
-            a = fact.get("answer", "").strip()     # user's knowledge
+            a = fact.get("answer", "").strip()  # user's knowledge
             if q and a:
                 return [SynthesizedQA(question=q, answer=a, source_fact=fact)]
 
@@ -246,3 +269,199 @@ Output ONLY valid JSON, nothing else:
         words = content.split()
         subject = " ".join(words[:5]).rstrip(".,;:")
         return f"Could you tell me more about {subject}?"
+
+
+# ── Passage-level synthesis (new inline chat flow) ────────────────────────────
+
+
+def synthesize_from_passage(
+    passage: str,
+    system_prompt: Optional[str] = None,
+    max_pairs: int = 5,
+) -> list[dict[str, str]]:
+    """
+    Generate Q&A training pairs directly from a raw passage of text.
+
+    Designed for the inline chat flow: user sends a passage → this function
+    is called synchronously from the FastAPI chat endpoint (via
+    asyncio.run_in_executor) → returns pairs immediately.
+
+    Each call to the model generates ONE Q&A pair at a time (batch_size=1)
+    which is far more reliable for small models like Llama 3.2 1B than asking
+    for a JSON array of 5 items.
+
+    Parameters
+    ----------
+    passage   : raw text the user sent as the training passage
+    system_prompt : optional system prompt context for the training data
+    max_pairs : maximum number of Q&A pairs to attempt (default 5)
+
+    Returns
+    -------
+    list of {"question": str, "answer": str} dicts — may be empty on failure.
+    """
+    if not passage or not passage.strip():
+        logger.warning("synthesize_from_passage: empty passage")
+        return []
+
+    passage = passage.strip()
+    results: list[dict[str, str]] = []
+
+    # Split passage into sentences / segments, cap at max_pairs
+    segments = _split_passage(passage, max_pairs)
+
+    logger.info(
+        "passage_synthesis_start",
+        extra={"segments": len(segments), "passage_len": len(passage)},
+    )
+
+    for i, segment in enumerate(segments):
+        try:
+            pair = _synthesize_one(segment, system_prompt)
+            if pair:
+                results.append(pair)
+                logger.info(
+                    "passage_pair_generated",
+                    extra={"index": i, "q_len": len(pair["question"])},
+                )
+        except Exception as exc:
+            logger.warning(f"passage_synthesis_segment_{i}_failed: {exc}")
+            # Fallback: derive a question from the segment without model call
+            fallback = _fallback_from_segment(segment)
+            if fallback:
+                results.append(fallback)
+
+    logger.info("passage_synthesis_complete", extra={"pairs": len(results)})
+    return results
+
+
+def _split_passage(passage: str, max_parts: int) -> list[str]:
+    """
+    Split a passage into up to `max_parts` meaningful segments.
+    Tries sentence boundaries first; falls back to even splitting.
+    """
+    import re
+
+    # Try splitting on sentence-ending punctuation
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", passage) if s.strip()]
+
+    if len(sentences) <= 1:
+        # Single sentence or no punctuation — use whole passage as one segment
+        return [passage]
+
+    if len(sentences) <= max_parts:
+        return sentences
+
+    # More sentences than max_parts — merge into roughly equal chunks
+    chunk_size = len(sentences) // max_parts
+    chunks = []
+    for i in range(0, len(sentences), max_parts):
+        chunk = " ".join(sentences[i : i + max_parts])
+        if chunk:
+            chunks.append(chunk)
+    return chunks[:max_parts]
+
+
+def _synthesize_one(
+    segment: str, system_prompt: Optional[str]
+) -> Optional[dict[str, str]]:
+    """
+    Ask the model to generate a single Q&A pair from one text segment.
+    Uses a tight single-object prompt optimised for small (1B) models.
+    """
+    context_note = f"\nContext: {system_prompt}" if system_prompt else ""
+    prompt = (
+        f"You are creating training data for an AI assistant.{context_note}\n\n"
+        f'Read this text: "{segment}"\n\n'
+        f"Write ONE question someone might ask about this text, "
+        f"and the best answer based on the text.\n\n"
+        f"Output ONLY valid JSON, nothing else:\n"
+        f'{{"question": "...", "answer": "..."}}'
+    )
+
+    try:
+        resp = requests.post(
+            f"{MODEL_SERVER_URL}/generate",
+            json={"prompt": prompt, "max_new_tokens": PASSAGE_MAX_TOKENS},
+            timeout=CALL_TIMEOUT,
+        )
+        if not resp.ok:
+            raise Exception(f"Model server returned {resp.status_code}")
+        raw = resp.json().get("response", resp.json().get("text", ""))
+        return _parse_single_pair(raw, segment)
+    except requests.RequestException as exc:
+        raise Exception(f"Model server unreachable: {exc}") from exc
+
+
+def _parse_single_pair(
+    response: str, fallback_segment: str
+) -> Optional[dict[str, str]]:
+    """
+    Parse a single {"question": ..., "answer": ...} object from model output.
+    Three-level fallback: direct parse → regex extract → derive from segment.
+    """
+    clean = re.sub(r"```(?:json)?|```", "", response).strip()
+
+    # Level 1: direct JSON parse
+    try:
+        obj = json.loads(clean)
+        if isinstance(obj, dict):
+            q = str(obj.get("question", "")).strip()
+            a = str(obj.get("answer", "")).strip()
+            if q and a and len(q) > 5 and len(a) > 5:
+                return {"question": q, "answer": a}
+        if isinstance(obj, list) and obj:
+            # Model returned array despite single-item prompt — take first
+            item = obj[0]
+            q = str(item.get("question", "")).strip()
+            a = str(item.get("answer", "")).strip()
+            if q and a and len(q) > 5 and len(a) > 5:
+                return {"question": q, "answer": a}
+    except json.JSONDecodeError:
+        pass
+
+    # Level 2: regex extract first {…} object
+    obj_match = re.search(
+        r'\{[^{}]*"question"\s*:\s*"([^"]+)"[^{}]*"answer"\s*:\s*"([^"]+)"[^{}]*\}',
+        clean,
+        re.DOTALL,
+    )
+    if obj_match:
+        q, a = obj_match.group(1).strip(), obj_match.group(2).strip()
+        if q and a and len(q) > 5 and len(a) > 5:
+            return {"question": q, "answer": a}
+
+    # Level 3: key-value scan
+    q_match = re.search(r'"question"\s*:\s*"([^"]{6,})"', clean)
+    a_match = re.search(r'"answer"\s*:\s*"([^"]{6,})"', clean)
+    if q_match and a_match:
+        return {
+            "question": q_match.group(1).strip(),
+            "answer": a_match.group(1).strip(),
+        }
+
+    logger.warning("parse_single_pair_failed", extra={"preview": clean[:200]})
+    return None
+
+
+def _fallback_from_segment(segment: str) -> Optional[dict[str, str]]:
+    """
+    No-model fallback: derive a generic question from the segment text.
+    Used when the model call fails entirely.
+    """
+    segment = segment.strip()
+    if not segment:
+        return None
+
+    # "X is/was Y" → "What is X?"
+    m = re.match(r"^(.+?)\s+(is|was|are|were)\s+(.+)", segment, re.I)
+    if m and len(m.group(1)) < 80:
+        return {
+            "question": f"What {m.group(2)} {m.group(1).strip()}?",
+            "answer": segment,
+        }
+
+    # Generic
+    words = segment.split()
+    subject = " ".join(words[:6]).rstrip(".,;:")
+    return {"question": f"Can you tell me about {subject}?", "answer": segment}

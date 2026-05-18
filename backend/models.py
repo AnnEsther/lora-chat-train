@@ -207,6 +207,11 @@ class SynthesizedQA(Base):
         ForeignKey("knowledge_records.id", ondelete="SET NULL"),
         nullable=True,
     )
+    source_turn_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("turns.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
     validated = Column(Boolean, nullable=False, default=False)

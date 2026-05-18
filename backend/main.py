@@ -33,6 +33,7 @@ from schemas import (
     CreateSessionRequest,
     SessionResponse,
     SessionListResponse,
+    QACountResponse,
 )
 from model_client import ModelClient
 import token_counter
@@ -44,7 +45,9 @@ from shared.slack_notifier import (
     insufficient_data_warning,
 )
 
-import json                          # already imported in most places, verify it's there
+MIN_TRAINING_SAMPLES: int = int(os.environ.get("MIN_TRAINING_SAMPLES", 10))
+
+import json  # already imported in most places, verify it's there
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,9 +72,7 @@ app = FastAPI(title="LoRA Chat & Train", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000",
-                   os.environ.get("EXTERNAL_SITE_ORIGIN", "")
-],
+    allow_origins=["http://localhost:3000", os.environ.get("EXTERNAL_SITE_ORIGIN", "")],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -244,103 +245,154 @@ async def chat(
     session.total_tokens += user_tokens
     await db.commit()
 
-    # Check if we are approaching limit before generating reply
-    remaining_before = MAX_SESSION_TOKENS - session.total_tokens
-
-    if remaining_before <= 0:
-        # Force sleep immediately — no reply
-        return StreamingResponse(
-            _force_sleep(session, db, reason="budget_exhausted"),
-            media_type="text/event-stream",
-        )
-
-    if remaining_before <= PRE_SLEEP_THRESHOLD and session.state == SessionState.ACTIVE:
-        await _transition(session, SessionState.PRE_SLEEP_WARNING, db)
-        pre_sleep_warning(str(session.id), remaining_before)
-
-    # Build conversation history for model
-    history = await _load_history(session_id, db)
-
-    model_client: ModelClient = app.state.model_client
-
+    # Synthesize Q&A pairs from this passage and stream them back inline
     return StreamingResponse(
-        _stream_reply(session, history, model_client, db),
+        _synthesize_and_stream(session, user_turn, request.message, db),
         media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
-async def _stream_reply(
+async def _synthesize_and_stream(
     session: ChatSession,
-    history: list[dict],
-    model_client: ModelClient,
+    user_turn: Turn,
+    passage: str,
     db: AsyncSession,
 ):
-    """Stream the assistant reply, persist it, and trigger sleep if budget hit."""
-    assistant_text = ""
-    assistant_tokens = 0
+    """
+    Synthesize Q&A pairs from the user's passage, persist them, and stream
+    the results back as SSE events so they appear inline in the chat window.
+
+    SSE events emitted:
+      {"type": "start"}
+      {"type": "qa_pairs", "pairs": [{"id": "...", "question": "...", "answer": "..."}]}
+      {"type": "qa_count", "total": N, "validated": N, "min_required": N, "ready": bool}
+      {"type": "end"}
+    """
+    import asyncio
+    from models import SynthesizedQA
 
     yield 'data: {"type":"start"}\n\n'
 
-    async for chunk in model_client.stream(history):
-        assistant_text += chunk
-        assistant_tokens += token_counter.count(chunk)
-        import json
+    # Run the synchronous synthesis call in a thread pool so we don't block the event loop
+    loop = asyncio.get_event_loop()
+    try:
+        from training.knowledge.synthesizer import synthesize_from_passage
 
-        yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+        pairs = await loop.run_in_executor(
+            None,
+            lambda: synthesize_from_passage(
+                passage,
+                system_prompt=session.training_system_prompt,
+            ),
+        )
+    except Exception as exc:
+        logger.error(
+            "synthesis_failed", extra={"error": str(exc), "session_id": str(session.id)}
+        )
+        pairs = []
 
-    # Persist assistant turn
-    assistant_turn = Turn(
-        id=uuid.uuid4(),
-        session_id=session.id,
-        role="assistant",
-        content=assistant_text,
-        token_count=assistant_tokens,
-    )
-    db.add(assistant_turn)
-    session.total_tokens += assistant_tokens
+    # Persist each pair linked to the user turn
+    persisted: list[dict] = []
+    for p in pairs:
+        qa = SynthesizedQA(
+            id=uuid.uuid4(),
+            session_id=session.id,
+            source_turn_id=user_turn.id,
+            question=p["question"],
+            answer=p["answer"],
+        )
+        db.add(qa)
+        persisted.append(
+            {"id": str(qa.id), "question": p["question"], "answer": p["answer"]}
+        )
+
     await db.commit()
 
-    remaining = MAX_SESSION_TOKENS - session.total_tokens
-    import json
+    # Emit the generated pairs
+    yield f"data: {json.dumps({'type': 'qa_pairs', 'pairs': persisted})}\n\n"
 
-    if session.state == SessionState.INSUFFICIENT_DATA:
-        status = {"remaining_tokens": remaining, "session_state": session.state}
-        yield f"data: {json.dumps({'type': 'status', **status})}\n\n"
-        yield 'data: {"type":"end"}\n\n'
-    elif (
-        remaining <= 0
-        or session.state == SessionState.PRE_SLEEP_WARNING
-        and remaining <= PRE_SLEEP_THRESHOLD // 2
-    ):
-        yield f"data: {json.dumps({'type': 'sleep_warning', 'message': 'Session closing — starting fine-tuning…'})}\n\n"
-        yield 'data: {"type":"end"}\n\n'
-        async for event in _force_sleep(session, db, reason="token_threshold"):
-            yield event
-    else:
-        status = {"remaining_tokens": remaining, "session_state": session.state}
-        yield f"data: {json.dumps({'type': 'status', **status})}\n\n"
-        yield 'data: {"type":"end"}\n\n'
+    # Emit updated count so the frontend knows whether Start Training is enabled
+    from sqlalchemy import func, select as sa_select
+    from models import SynthesizedQA as _SQA
+
+    total_result = await db.execute(
+        sa_select(func.count()).select_from(_SQA).where(_SQA.session_id == session.id)
+    )
+    validated_result = await db.execute(
+        sa_select(func.count())
+        .select_from(_SQA)
+        .where(_SQA.session_id == session.id, _SQA.validated == True)
+    )
+    total_count = total_result.scalar() or 0
+    validated_count = validated_result.scalar() or 0
+
+    yield f"data: {json.dumps({'type': 'qa_count', 'total': total_count, 'validated': validated_count, 'min_required': MIN_TRAINING_SAMPLES, 'ready': validated_count >= MIN_TRAINING_SAMPLES})}\n\n"
+
+    yield 'data: {"type":"end"}\n\n'
 
 
 async def _handle_sleep_command(session: ChatSession, db: AsyncSession):
-    import json
-
-    yield f"data: {json.dumps({'type': 'sleep_ack', 'message': 'Going to sleep — see you after fine-tuning!'})}\n\n"
+    yield f"data: {json.dumps({'type': 'sleep_ack', 'message': 'Going to sleep — starting fine-tuning pipeline…'})}\n\n"
     yield 'data: {"type":"end"}\n\n'
     async for event in _force_sleep(session, db, reason="user_command"):
         yield event
 
 
 async def _force_sleep(session: ChatSession, db: AsyncSession, reason: str):
-    import json
-    from worker.tasks import enqueue_phase1_pipeline
+    """
+    Transition session to TRAINING and enqueue Phase 2 pipeline.
 
-    await _transition(session, SessionState.VALIDATING, db)
-    logger.info(
-        "session_validating", extra={"session_id": str(session.id), "reason": reason}
+    In the new flow QA is collected inline during chat, so /sleep skips
+    Phase 1 (extraction/synthesis) and goes straight to Phase 2
+    (build dataset → train → evaluate → deploy).
+    Falls back to enqueuing Phase 1 if no synthesized QA exists yet.
+    """
+    from models import SynthesizedQA
+    from sqlalchemy import func, select as sa_select
+
+    result = await db.execute(
+        sa_select(func.count())
+        .select_from(SynthesizedQA)
+        .where(SynthesizedQA.session_id == session.id)
     )
-    enqueue_phase1_pipeline.delay(str(session.id))
-    yield f"data: {json.dumps({'type': 'validating', 'reason': reason})}\n\n"
+    qa_count = result.scalar() or 0
+
+    if qa_count > 0:
+        # QA already collected inline — mark all as validated and go straight to Phase 2
+        qa_result = await db.execute(
+            sa_select(SynthesizedQA).where(SynthesizedQA.session_id == session.id)
+        )
+        qa_items = qa_result.scalars().all()
+        for qa in qa_items:
+            if not qa.validated:
+                qa.validated = True
+        await db.commit()
+
+        from worker.tasks import enqueue_phase2_pipeline
+
+        await _transition(session, SessionState.TRAINING, db)
+        enqueue_phase2_pipeline.delay(str(session.id))
+        logger.info(
+            "session_training_phase2",
+            extra={
+                "session_id": str(session.id),
+                "reason": reason,
+                "qa_count": qa_count,
+            },
+        )
+        yield f"data: {json.dumps({'type': 'sleeping', 'reason': reason, 'message': 'Training started — your Q&A pairs are being used to fine-tune the model.'})}\n\n"
+    else:
+        # No inline QA — fall back to Phase 1 pipeline (legacy extraction flow)
+        from worker.tasks import enqueue_phase1_pipeline
+
+        await _transition(session, SessionState.VALIDATING, db)
+        enqueue_phase1_pipeline.delay(str(session.id))
+        logger.info(
+            "session_validating_phase1_fallback",
+            extra={"session_id": str(session.id), "reason": reason},
+        )
+        yield f"data: {json.dumps({'type': 'validating', 'reason': reason, 'message': 'Processing conversation for training data…'})}\n\n"
 
 
 # ── Helper utilities ──────────────────────────────────────────────────────────
@@ -416,6 +468,7 @@ async def get_session_qa(
             "edited": qa.edited,
             "retry_count": qa.retry_count,
             "validation_notes": qa.validation_notes,
+            "source_turn_id": str(qa.source_turn_id) if qa.source_turn_id else None,
         }
         for qa in qa_items
     ]
@@ -504,6 +557,37 @@ async def delete_qa(
     return {"status": "ok", "id": str(qa_id)}
 
 
+@app.get("/sessions/{session_id}/qa/count", response_model=QACountResponse)
+async def get_qa_count(
+    session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> QACountResponse:
+    """Return total and validated Q&A counts for the session."""
+    from models import SynthesizedQA
+    from sqlalchemy import func
+
+    total_result = await db.execute(
+        select(func.count())
+        .select_from(SynthesizedQA)
+        .where(SynthesizedQA.session_id == session_id)
+    )
+    validated_result = await db.execute(
+        select(func.count())
+        .select_from(SynthesizedQA)
+        .where(
+            SynthesizedQA.session_id == session_id,
+            SynthesizedQA.validated == True,
+        )
+    )
+    total = total_result.scalar() or 0
+    validated = validated_result.scalar() or 0
+    return QACountResponse(
+        total_count=total,
+        validated_count=validated,
+        min_required=MIN_TRAINING_SAMPLES,
+        ready_to_train=validated >= MIN_TRAINING_SAMPLES,
+    )
+
+
 @app.post("/sessions/{session_id}/restart-training")
 async def restart_training(
     session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
@@ -577,39 +661,65 @@ async def restart_training(
 async def start_training(
     session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
 ) -> dict:
-    """Start Phase 2 of training after user validates QA."""
-    from sqlalchemy import select
+    """
+    Start Phase 2 training pipeline.
+
+    Accepts sessions in ACTIVE or VALIDATING state.
+    Requires at least MIN_TRAINING_SAMPLES validated Q&A pairs.
+    Marks all unvalidated pairs as validated before starting.
+    """
+    from sqlalchemy import func
     from worker.tasks import enqueue_phase2_pipeline
+    from models import SynthesizedQA
 
     session = await _get_active_session(session_id, db)
 
-    if session.state != "VALIDATING":
+    if session.state not in ("ACTIVE", "VALIDATING", "INSUFFICIENT_DATA"):
         raise HTTPException(
-            400, "Session must be in VALIDATING state to start training"
+            400,
+            f"Cannot start training from state {session.state}. "
+            "Session must be ACTIVE, VALIDATING, or INSUFFICIENT_DATA.",
         )
 
-    # Check if there's at least one validated QA
-    from models import SynthesizedQA
-
-    result = await db.execute(
-        select(SynthesizedQA).where(
+    # Count validated pairs
+    validated_result = await db.execute(
+        select(func.count())
+        .select_from(SynthesizedQA)
+        .where(
             SynthesizedQA.session_id == session_id,
             SynthesizedQA.validated == True,
         )
     )
-    validated_qa = result.scalars().all()
+    validated_count = validated_result.scalar() or 0
 
-    if len(validated_qa) == 0:
+    if validated_count < MIN_TRAINING_SAMPLES:
         raise HTTPException(
-            400, "No validated QA found. Please validate at least one QA pair."
+            400,
+            f"Not enough validated Q&A pairs. "
+            f"Need {MIN_TRAINING_SAMPLES}, have {validated_count}. "
+            "Validate more pairs before starting training.",
         )
+
+    # Mark all remaining unvalidated pairs as validated
+    unvalidated_result = await db.execute(
+        select(SynthesizedQA).where(
+            SynthesizedQA.session_id == session_id,
+            SynthesizedQA.validated == False,
+        )
+    )
+    for qa in unvalidated_result.scalars().all():
+        qa.validated = True
+    await db.commit()
 
     # Transition to TRAINING and trigger Phase 2
     await _transition(session, SessionState.TRAINING, db)
     enqueue_phase2_pipeline.delay(str(session_id))
 
-    logger.info("training_started", extra={"session_id": str(session_id)})
-    return {"status": "ok"}
+    logger.info(
+        "training_started",
+        extra={"session_id": str(session_id), "validated_count": validated_count},
+    )
+    return {"status": "ok", "validated_count": validated_count}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -679,17 +789,56 @@ async def list_outputs() -> list[dict]:
     # Return most recent 30 files to keep the panel compact
     return files[-30:]
 
+
 @app.get("/sessions/{session_id}/turns")
-async def get_session_turns(session_id: uuid.UUID, db: AsyncSession = Depends(get_db),) -> list[dict]:
-    history = await _load_history(session_id, db)
-    return history
+async def get_session_turns(
+    session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> list[dict]:
+    """Return turn history with Q&A pairs attached to each user turn."""
+    from models import SynthesizedQA
+
+    result = await db.execute(
+        select(Turn).where(Turn.session_id == session_id).order_by(Turn.created_at)
+    )
+    turns = result.scalars().all()
+
+    # Load all QA pairs for the session, keyed by source_turn_id
+    qa_result = await db.execute(
+        select(SynthesizedQA).where(SynthesizedQA.session_id == session_id)
+    )
+    qa_items = qa_result.scalars().all()
+
+    qa_by_turn: dict[str, list[dict]] = {}
+    for qa in qa_items:
+        key = str(qa.source_turn_id) if qa.source_turn_id else "__unlinked__"
+        qa_by_turn.setdefault(key, []).append(
+            {
+                "id": str(qa.id),
+                "question": qa.question,
+                "answer": qa.answer,
+                "validated": qa.validated,
+                "edited": qa.edited,
+            }
+        )
+
+    return [
+        {
+            "role": t.role,
+            "content": t.content,
+            "id": str(t.id),
+            "qa_pairs": qa_by_turn.get(str(t.id), []) if t.role == "user" else [],
+        }
+        for t in turns
+    ]
+
 
 # ── Glyph Chat API ─────────────────────────────────────────────────────────────
+
 
 class DirectChatRequest(BaseModel):
     message: str
     adapter_id: str = "base"
-    history: list[dict] = []   # [{"role": "user/assistant", "content": "..."}]
+    history: list[dict] = []  # [{"role": "user/assistant", "content": "..."}]
 
 
 async def _verify_api_key(x_api_key: str = Header(...)):
@@ -705,6 +854,7 @@ async def list_adapters_public() -> dict:
     Proxies directly to the model server's /adapters endpoint.
     """
     import httpx
+
     model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
     try:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -714,7 +864,9 @@ async def list_adapters_public() -> dict:
     except Exception as exc:
         logger.warning("adapters_public_fetch_failed", extra={"error": str(exc)})
     return {
-        "adapters": [{"id": "base", "version": "Base model", "path": "", "is_base": True}]
+        "adapters": [
+            {"id": "base", "version": "Base model", "path": "", "is_base": True}
+        ]
     }
 
 
@@ -727,6 +879,7 @@ async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
     # Load the requested adapter if it isn't the base
     if request.adapter_id and request.adapter_id != "base":
         import requests as req
+
         model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
         try:
             adapters_resp = req.get(f"{model_url}/adapters", timeout=5)

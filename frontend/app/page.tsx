@@ -6,6 +6,9 @@ import { HelpPanel } from "@/app/components/HelpPanel";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MODEL_SERVER_URL = process.env.NEXT_PUBLIC_MODEL_SERVER_URL ?? "http://localhost:8001";
 const POLL_INTERVAL_MS = 5000;
+const MIN_TRAINING_SAMPLES = parseInt(process.env.NEXT_PUBLIC_MIN_TRAINING_SAMPLES ?? "10", 10);
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 type SessionState =
   | "ACTIVE"
@@ -19,10 +22,21 @@ type SessionState =
   | "READY"
   | "FAILED";
 
+interface QAPair {
+  id: string;
+  question: string;
+  answer: string;
+  validated: boolean;
+  edited: boolean;
+}
+
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
+  id?: string;
   streaming?: boolean;
+  synthLoading?: boolean;
+  qaPairs?: QAPair[];
 }
 
 interface Session {
@@ -34,6 +48,13 @@ interface Session {
   training_system_prompt?: string | null;
   failure_reason?: string | null;
   created_at: string;
+}
+
+interface QACount {
+  total_count: number;
+  validated_count: number;
+  min_required: number;
+  ready_to_train: boolean;
 }
 
 interface TrainStatus {
@@ -73,6 +94,8 @@ interface Adapter {
   is_base?: boolean;
 }
 
+// ── State colours / labels ────────────────────────────────────────────────────
+
 const STATE_COLORS: Record<SessionState, string> = {
   ACTIVE:            "bg-green-100 text-green-800",
   PRE_SLEEP_WARNING: "bg-yellow-100 text-yellow-800",
@@ -90,8 +113,8 @@ const STATE_LABELS: Record<SessionState, string> = {
   ACTIVE:            "Active",
   PRE_SLEEP_WARNING: "⚠ Low tokens",
   INSUFFICIENT_DATA: "⚠ Need more data",
-  VALIDATING:        "⚠ Review training data",
-  SLEEPING:          "Sleeping — training queued",
+  VALIDATING:        "Processing…",
+  SLEEPING:          "Training queued",
   TRAINING:          "Training…",
   EVALUATING:        "Evaluating…",
   DEPLOYING:         "Deploying…",
@@ -105,10 +128,7 @@ function GaugeBar({ value, max, color }: { value: number; max: number; color: st
   const pct = Math.min((value / max) * 100, 100);
   return (
     <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-      <div
-        className={`h-full rounded-full transition-all duration-500 ${color}`}
-        style={{ width: `${pct}%` }}
-      />
+      <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${pct}%` }} />
     </div>
   );
 }
@@ -118,7 +138,7 @@ function StatRow({ label, value, sub, valueColor }: { label: string; value: stri
     <div className="flex items-center justify-between py-1.5 border-b border-gray-100 last:border-0">
       <span className="text-xs text-gray-500">{label}</span>
       <div className="text-right">
-        <span className={`text-xs font-medium ${valueColor || "text-gray-800"}`}>{value}</span>
+        <span className={`text-xs font-medium ${valueColor ?? "text-gray-800"}`}>{value}</span>
         {sub && <span className="block text-xs text-gray-400">{sub}</span>}
       </div>
     </div>
@@ -134,25 +154,9 @@ function SectionHeader({ title, dot }: { title: string; dot?: string }) {
   );
 }
 
-function PipelineStep({
-  label,
-  state,
-}: {
-  label: string;
-  state: "done" | "active" | "pending" | "failed";
-}) {
-  const icons = {
-    done:    <span className="text-green-500 text-sm">✓</span>,
-    active:  <span className="animate-spin text-blue-500 text-sm inline-block">⟳</span>,
-    pending: <span className="text-gray-300 text-sm">○</span>,
-    failed:  <span className="text-red-500 text-sm">✗</span>,
-  };
-  const labels = {
-    done:    "text-green-700",
-    active:  "text-blue-700 font-medium",
-    pending: "text-gray-400",
-    failed:  "text-red-600",
-  };
+function PipelineStep({ label, state }: { label: string; state: "done" | "active" | "pending" | "failed" }) {
+  const icons = { done: <span className="text-green-500 text-sm">✓</span>, active: <span className="animate-spin text-blue-500 text-sm inline-block">⟳</span>, pending: <span className="text-gray-300 text-sm">○</span>, failed: <span className="text-red-500 text-sm">✗</span> };
+  const labels = { done: "text-green-700", active: "text-blue-700 font-medium", pending: "text-gray-400", failed: "text-red-600" };
   return (
     <div className="flex items-center gap-2 py-1">
       <div className="w-4 flex justify-center">{icons[state]}</div>
@@ -161,42 +165,16 @@ function PipelineStep({
   );
 }
 
-// Map session state → which pipeline steps are done/active/pending
 function getPipelineSteps(sessionState: SessionState, trainStatus?: TrainStatus) {
-  const steps = [
-    "Extract candidates",
-    "Curate & score",
-    "Build dataset",
-    "Train (RTX 4060)",
-    "Evaluate",
-    "Deploy adapter",
-  ];
-
+  const steps = ["Build dataset", "Train model", "Evaluate", "Deploy adapter"];
   const stateToActiveStep: Record<SessionState, number> = {
-    VALIDATING: 0,
-    SLEEPING: 3,
-    TRAINING: 3,
-    EVALUATING: 4,
-    DEPLOYING: 5,
-    READY: 5,
-    FAILED: -1,
-    ACTIVE: -1,
-    PRE_SLEEP_WARNING: -1,
-    INSUFFICIENT_DATA: -1,
+    TRAINING: 1, EVALUATING: 2, DEPLOYING: 3, READY: 3,
+    FAILED: -1, ACTIVE: -1, PRE_SLEEP_WARNING: -1, INSUFFICIENT_DATA: -1, VALIDATING: 0, SLEEPING: 1,
   };
-
-  const isTrainingComplete = trainStatus?.status === "completed";
-
-  if (isTrainingComplete) {
-    return steps.map((label, i) => ({ label, state: "done" as const }));
-  }
-
+  if (trainStatus?.status === "completed") return steps.map((label) => ({ label, state: "done" as const }));
   const activeStep = stateToActiveStep[sessionState] ?? -1;
-
   return steps.map((label, i) => {
-    if (sessionState === "FAILED") {
-      return { label, state: i < activeStep ? "done" : i === activeStep ? "failed" : "pending" } as const;
-    }
+    if (sessionState === "FAILED") return { label, state: i < activeStep ? "done" : i === activeStep ? "failed" : "pending" } as const;
     if (i < activeStep) return { label, state: "done" } as const;
     if (i === activeStep) return { label, state: "active" } as const;
     return { label, state: "pending" } as const;
@@ -214,13 +192,7 @@ function elapsed(isoStr: string | null): string {
 // ── Diagnostic panel ──────────────────────────────────────────────────────────
 
 function DiagnosticPanel({
-  session,
-  health,
-  trainStatus,
-  lastPoll,
-  selectedAdapter,
-  adapters,
-  onRestartTraining,
+  session, health, trainStatus, lastPoll, selectedAdapter, adapters, qaCount, onRestartTraining,
 }: {
   session: Session | null;
   health: ModelHealth | null;
@@ -228,186 +200,98 @@ function DiagnosticPanel({
   lastPoll: Date | null;
   selectedAdapter: string;
   adapters: Adapter[];
+  qaCount: QACount | null;
   onRestartTraining?: () => void;
 }) {
   const gpu = health?.gpu ?? null;
   const vramPct = gpu ? gpu.vram_used_gb / gpu.vram_total_gb : 0;
   const tokenPct = session ? session.total_tokens / session.max_tokens : 0;
-
   const isTraining = trainStatus?.status === "running";
   const pipelineSteps = session ? getPipelineSteps(session.state, trainStatus ?? undefined) : [];
-  
-  const currentAdapter = adapters.find(a => a.id === selectedAdapter);
-  const adapterVersion = currentAdapter?.version || "Base model";
+  const adapterVersion = adapters.find(a => a.id === selectedAdapter)?.version ?? "Base model";
 
   return (
     <aside className="w-72 min-w-72 h-screen overflow-y-auto bg-gray-50 border-l border-gray-200 px-4 py-4 flex flex-col gap-0 text-sm">
-
-      {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold text-gray-700 text-sm">Diagnostics</h2>
-        {lastPoll && (
-          <span className="text-xs text-gray-400">
-            updated {elapsed(lastPoll.toISOString())} ago
-          </span>
-        )}
+        {lastPoll && <span className="text-xs text-gray-400">updated {elapsed(lastPoll.toISOString())} ago</span>}
       </div>
 
-      {/* ── Model server ── */}
-      <SectionHeader
-        title="Model server"
-        dot={health?.status === "ok" ? "bg-green-400" : "bg-red-400"}
-      />
+      <SectionHeader title="Model server" dot={health?.status === "ok" ? "bg-green-400" : "bg-red-400"} />
       <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
-        <StatRow
-          label="Status"
-          value={health ? (health.model_loaded ? "Ready" : "Loading…") : "Unreachable"}
-        />
-        <StatRow
-          label="Adapter"
-          value={health?.adapter
-            ? health.adapter.split(/[\\/]/).slice(-2).join("/")
-            : "Base model"}
-        />
-        <StatRow
-          label="Training"
-          value={health?.training_active ? "🔥 In progress" : "Idle"}
-        />
+        <StatRow label="Status" value={health ? (health.model_loaded ? "Ready" : "Loading…") : "Unreachable"} />
+        <StatRow label="Adapter" value={health?.adapter ? health.adapter.split(/[\\/]/).slice(-2).join("/") : "Base model"} />
+        <StatRow label="Training" value={health?.training_active ? "🔥 In progress" : "Idle"} />
       </div>
 
-      {/* ── GPU ── */}
       {gpu && (
         <>
           <SectionHeader title="GPU" dot="bg-purple-400" />
           <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
             <StatRow label="Device" value={gpu.name} />
-            <StatRow
-              label="VRAM used"
-              value={`${gpu.vram_used_gb.toFixed(1)} / ${gpu.vram_total_gb.toFixed(1)} GB`}
-            />
+            <StatRow label="VRAM used" value={`${gpu.vram_used_gb.toFixed(1)} / ${gpu.vram_total_gb.toFixed(1)} GB`} />
             <div className="py-1">
-              <GaugeBar
-                value={gpu.vram_used_gb}
-                max={gpu.vram_total_gb}
-                color={vramPct > 0.85 ? "bg-red-400" : vramPct > 0.65 ? "bg-yellow-400" : "bg-purple-400"}
-              />
+              <GaugeBar value={gpu.vram_used_gb} max={gpu.vram_total_gb} color={vramPct > 0.85 ? "bg-red-400" : vramPct > 0.65 ? "bg-yellow-400" : "bg-purple-400"} />
             </div>
-            {trainStatus?.vram_used_gb != null && (
-              <StatRow
-                label="Training VRAM"
-                value={`${trainStatus.vram_used_gb.toFixed(1)} GB`}
-                sub={trainStatus.vram_free_gb != null
-                  ? `${trainStatus.vram_free_gb.toFixed(1)} GB free`
-                  : undefined}
-              />
-            )}
           </div>
         </>
       )}
 
-      {/* ── Session ── */}
       {session && (
         <>
           <SectionHeader title="Session" dot="bg-blue-400" />
           <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
             <StatRow label="ID" value={session.id.slice(0, 8) + "…"} />
-            <StatRow
-              label="State"
-              value={STATE_LABELS[session.state]}
-            />
-            <StatRow
-              label="Tokens"
-              value={`${session.total_tokens} / ${session.max_tokens}`}
-            />
+            <StatRow label="State" value={STATE_LABELS[session.state]} />
+            <StatRow label="Tokens" value={`${session.total_tokens} / ${session.max_tokens}`} />
             <div className="py-1">
-              <GaugeBar
-                value={session.total_tokens}
-                max={session.max_tokens}
-                color={tokenPct > 0.85 ? "bg-red-400" : tokenPct > 0.7 ? "bg-yellow-400" : "bg-blue-400"}
-              />
+              <GaugeBar value={session.total_tokens} max={session.max_tokens} color={tokenPct > 0.85 ? "bg-red-400" : tokenPct > 0.7 ? "bg-yellow-400" : "bg-blue-400"} />
             </div>
-            <StatRow
-              label="Started"
-              value={new Date(session.created_at).toLocaleTimeString()}
-            />
-            <StatRow
-              label="Adapter"
-              value={adapterVersion}
-            />
-            {session.system_prompt && (
-              <div className="mt-2 pt-2 border-t border-gray-100">
-                <p className="text-xs text-gray-500 mb-1">Chat system prompt</p>
-                <p className="text-xs text-gray-700 bg-gray-50 rounded p-2 max-h-16 overflow-y-auto">
-                  {session.system_prompt}
-                </p>
-              </div>
-            )}
-            {session.training_system_prompt && (
-              <div className="mt-2 pt-2 border-t border-gray-100">
-                <p className="text-xs text-gray-500 mb-1">Training system prompt</p>
-                <p className="text-xs text-gray-700 bg-gray-50 rounded p-2 max-h-16 overflow-y-auto">
-                  {session.training_system_prompt}
-                </p>
-              </div>
-            )}
+            <StatRow label="Adapter" value={adapterVersion} />
           </div>
         </>
       )}
 
-      {/* ── Pipeline ── */}
+      {qaCount !== null && (
+        <>
+          <SectionHeader title="Training data" dot={qaCount.ready_to_train ? "bg-green-400" : "bg-amber-400"} />
+          <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
+            <StatRow label="Total Q&A pairs" value={String(qaCount.total_count)} />
+            <StatRow label="Validated" value={`${qaCount.validated_count} / ${qaCount.min_required} needed`} valueColor={qaCount.ready_to_train ? "text-green-600" : "text-amber-600"} />
+            <div className="py-1">
+              <GaugeBar value={qaCount.validated_count} max={qaCount.min_required} color={qaCount.ready_to_train ? "bg-green-400" : "bg-amber-400"} />
+            </div>
+          </div>
+        </>
+      )}
+
       {session && !["ACTIVE", "PRE_SLEEP_WARNING"].includes(session.state) && (
         <>
           <SectionHeader title="Pipeline" dot="bg-amber-400" />
           <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
-            {pipelineSteps.map((step) => (
-              <PipelineStep key={step.label} label={step.label} state={step.state} />
-            ))}
+            {pipelineSteps.map((step) => <PipelineStep key={step.label} label={step.label} state={step.state} />)}
           </div>
         </>
       )}
 
-      {/* ── Training progress ── */}
       {trainStatus && trainStatus.status !== "idle" && (
         <>
-          <SectionHeader 
-            title="Training" 
-            dot={trainStatus.status === "failed" ? "bg-red-400" : isTraining ? "bg-blue-400 animate-pulse" : "bg-green-400"} 
-          />
+          <SectionHeader title="Training" dot={trainStatus.status === "failed" ? "bg-red-400" : isTraining ? "bg-blue-400 animate-pulse" : "bg-green-400"} />
           <div className={`rounded-lg border px-3 py-2 ${trainStatus.status === "failed" ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
-            <StatRow
-              label="Status"
-              value={trainStatus.status.charAt(0).toUpperCase() + trainStatus.status.slice(1)}
-              valueColor={trainStatus.status === "failed" ? "text-red-600" : undefined}
-            />
-            {trainStatus.run_id && (
-              <StatRow label="Run ID" value={trainStatus.run_id.slice(0, 8) + "…"} />
-            )}
+            <StatRow label="Status" value={trainStatus.status.charAt(0).toUpperCase() + trainStatus.status.slice(1)} valueColor={trainStatus.status === "failed" ? "text-red-600" : undefined} />
+            {trainStatus.run_id && <StatRow label="Run ID" value={trainStatus.run_id.slice(0, 8) + "…"} />}
             <div className="py-1.5">
               <p className="text-xs text-gray-500 mb-0.5">Progress</p>
-              <p className={`text-xs leading-relaxed ${trainStatus.status === "failed" ? "text-red-700" : "text-gray-800"}`}>
-                {trainStatus.progress || "—"}
-              </p>
+              <p className={`text-xs leading-relaxed ${trainStatus.status === "failed" ? "text-red-700" : "text-gray-800"}`}>{trainStatus.progress || "—"}</p>
             </div>
-            {trainStatus.started_at && (
-              <StatRow
-                label="Running for"
-                value={elapsed(trainStatus.started_at)}
-              />
-            )}
-            {trainStatus.finished_at && (
-              <StatRow
-                label="Finished"
-                value={new Date(trainStatus.finished_at).toLocaleTimeString()}
-              />
-            )}
+            {trainStatus.started_at && <StatRow label="Running for" value={elapsed(trainStatus.started_at)} />}
+            {trainStatus.finished_at && <StatRow label="Finished" value={new Date(trainStatus.finished_at).toLocaleTimeString()} />}
             {trainStatus.status === "failed" && session && (
               <button
                 onClick={async () => {
                   try {
                     const resp = await fetch(`${API_URL}/sessions/${session.id}/restart-training`, { method: "POST" });
-                    if (resp.ok && onRestartTraining) {
-                      onRestartTraining();
-                    }
+                    if (resp.ok && onRestartTraining) onRestartTraining();
                   } catch {}
                 }}
                 className="mt-2 w-full text-xs px-3 py-1.5 rounded bg-red-100 hover:bg-red-200 text-red-700"
@@ -419,283 +303,175 @@ function DiagnosticPanel({
         </>
       )}
 
-      {/* ── Quick links ── */}
       <SectionHeader title="Quick links" />
       <div className="bg-white rounded-lg border border-gray-200 px-3 py-2 space-y-1">
         {[
-          { label: "Model health",    href: `${MODEL_SERVER_URL}/health` },
-          { label: "Train status",    href: `${MODEL_SERVER_URL}/train/status` },
-          { label: "API health",      href: `${API_URL}/health` },
-          { label: "Training runs",   href: `${API_URL}/training/runs` },
+          { label: "Model health",  href: `${MODEL_SERVER_URL}/health` },
+          { label: "Train status",  href: `${MODEL_SERVER_URL}/train/status` },
+          { label: "API health",    href: `${API_URL}/health` },
         ].map((link) => (
-          <a
-            key={link.href}
-            href={link.href}
-            target="_blank"
-            rel="noreferrer"
-            className="block text-xs text-blue-600 hover:text-blue-800 hover:underline py-0.5"
-          >
+          <a key={link.href} href={link.href} target="_blank" rel="noreferrer" className="block text-xs text-blue-600 hover:text-blue-800 hover:underline py-0.5">
             {link.label} ↗
           </a>
         ))}
       </div>
-
-      {/* bottom padding */}
       <div className="h-6" />
     </aside>
+  );
+}
+
+// ── Inline QA card ────────────────────────────────────────────────────────────
+
+function QACard({
+  pair,
+  sessionId,
+  onUpdate,
+  onDelete,
+}: {
+  pair: QAPair;
+  sessionId: string;
+  onUpdate: (id: string, updates: Partial<QAPair>) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [question, setQuestion] = useState(pair.question);
+  const [answer, setAnswer] = useState(pair.answer);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const isDirty = question !== pair.question || answer !== pair.answer;
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, answer }),
+      });
+      if (resp.ok) onUpdate(pair.id, { question, answer, edited: true });
+    } catch {}
+    setSaving(false);
+  };
+
+  const handleValidateToggle = async () => {
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ validated: !pair.validated }),
+      });
+      if (resp.ok) onUpdate(pair.id, { validated: !pair.validated });
+    } catch {}
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, { method: "DELETE" });
+      onDelete(pair.id);
+    } catch {}
+    setDeleting(false);
+    setConfirmDelete(false);
+  };
+
+  return (
+    <div className={`mt-2 rounded-xl border text-sm ${pair.validated ? "border-green-200 bg-green-50" : "border-gray-200 bg-white"}`}>
+      {/* Card header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${pair.validated ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
+          {pair.validated ? "✓ Validated" : "Pending"}
+        </span>
+        {isDirty && <span className="text-xs text-amber-600 font-medium">Unsaved changes</span>}
+      </div>
+
+      <div className="p-3 space-y-3">
+        {/* Question */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Question</label>
+          <textarea
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            rows={2}
+            className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
+          />
+        </div>
+
+        {/* Answer */}
+        <div>
+          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Answer</label>
+          <textarea
+            value={answer}
+            onChange={(e) => setAnswer(e.target.value)}
+            rows={3}
+            className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
+          />
+        </div>
+
+        {/* Action row */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {isDirty && (
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 transition-colors"
+            >
+              {saving ? "Saving…" : "Save changes"}
+            </button>
+          )}
+          <button
+            onClick={handleValidateToggle}
+            className={`text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors ${pair.validated ? "bg-gray-50 hover:bg-gray-100 text-gray-500 border-gray-200" : "bg-green-50 hover:bg-green-100 text-green-700 border-green-200"}`}
+          >
+            {pair.validated ? "Unmark" : "Mark validated"}
+          </button>
+          <div className="flex-1" />
+          {confirmDelete ? (
+            <>
+              <button onClick={handleDelete} disabled={deleting} className="text-xs px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-50 transition-colors">
+                {deleting ? "Deleting…" : "Yes, delete"}
+              </button>
+              <button onClick={() => setConfirmDelete(false)} className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition-colors">
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setConfirmDelete(true)} className="text-xs px-2 py-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors">
+              Delete
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
-  const [sessions, setSessions]       = useState<Session[]>([]);
-  const [session, setSession]         = useState<Session | null>(null);
-  const [messages, setMessages]       = useState<Message[]>([]);
-  const [input, setInput]             = useState("");
-  const [loading, setLoading]         = useState(false);
-  const [error, setError]             = useState<string | null>(null);
-  const [health, setHealth]           = useState<ModelHealth | null>(null);
-  const [trainStatus, setTrainStatus] = useState<TrainStatus | null>(null);
-  const [outputFiles, setOutputFiles] = useState<OutputFile[]>([]);
-  const [adapters, setAdapters]       = useState<Adapter[]>([{ id: "base", version: "Base model", path: "", is_base: true, trained_at: null }]);
+  const [sessions, setSessions]         = useState<Session[]>([]);
+  const [session, setSession]           = useState<Session | null>(null);
+  const [messages, setMessages]         = useState<Message[]>([]);
+  const [input, setInput]               = useState("");
+  const [loading, setLoading]           = useState(false);
+  const [error, setError]               = useState<string | null>(null);
+  const [health, setHealth]             = useState<ModelHealth | null>(null);
+  const [trainStatus, setTrainStatus]   = useState<TrainStatus | null>(null);
+  const [qaCount, setQaCount]           = useState<QACount | null>(null);
+  const [outputFiles, setOutputFiles]   = useState<OutputFile[]>([]);
+  const [adapters, setAdapters]         = useState<Adapter[]>([{ id: "base", version: "Base model", path: "", is_base: true, trained_at: null }]);
   const [selectedAdapter, setSelectedAdapter] = useState<string>("base");
   const [trainingSystemPrompt, setTrainingSystemPrompt] = useState<string>("");
-  const [lastPoll, setLastPoll]       = useState<Date | null>(null);
-  const [panelOpen, setPanelOpen]     = useState(true);
-  const [pollActive, setPollActive]   = useState(false);
   const [systemPrompt, setSystemPrompt] = useState<string>("");
-  const [qaReviewOpen, setQaReviewOpen] = useState(false);
-  const [qaItems, setQaItems] = useState<{id: string; question: string; answer: string; validated: boolean; edited: boolean; retry_count: number; validation_notes: string}[]>([]);
-  const [qaCurrentIndex, setQaCurrentIndex] = useState(0);
-  const [qaLoading, setQaLoading] = useState(false);
-  const [qaDeleteConfirm, setQaDeleteConfirm] = useState(false);
-  const [qaUnsavedConfirm, setQaUnsavedConfirm] = useState<"prev" | "next" | null>(null);
+  const [lastPoll, setLastPoll]         = useState<Date | null>(null);
+  const [panelOpen, setPanelOpen]       = useState(true);
+  const [startingTraining, setStartingTraining] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
-
-  const fetchTurns = useCallback(async (sessionId: string) => {
-  try {
-    const resp = await fetch(`${API_URL}/sessions/${sessionId}/turns`);
-    if (!resp.ok) return;
-    const turns: { role: "user" | "assistant" | "system"; content: string }[] =
-      await resp.json();
-    if (turns.length > 0) {
-      setMessages(turns.map((t) => ({ role: t.role, content: t.content })));
-    }
-  } catch {}
-}, []);
-
-  // ── Load sessions list ──
-  const fetchSessions = useCallback(async () => {
-    try {
-      const resp = await fetch(`${API_URL}/sessions?limit=20`);
-      if (resp.ok) {
-        const data = await resp.json();
-        const sessionsList: Session[] = Array.isArray(data) ? data : (data.sessions ?? []);
-        setSessions(sessionsList);
-        return sessionsList;
-      }
-    } catch {}
-    return [];
-  }, []);
-
-  // ── Restore last session from localStorage ──
-  useEffect(() => {
-    const restoreSession = async () => {
-      const savedId = localStorage.getItem("lora_session_id");
-      const allSessions = await fetchSessions();
-      
-      if (savedId && allSessions.length > 0) {
-        const found = allSessions.find(s => s.id === savedId);
-        if (found) {
-          setSession(found);
-          await fetchTurns(found.id);
-          return;
-        }
-      }
-      // Fall back to most recent non-READY session, or latest session
-      const target = allSessions.find(s => !["READY", "FAILED"].includes(s.state)) ?? allSessions[0];
-      if (target) {
-        setSession(target);
-        await fetchTurns(target.id);
-      } else {
-        // No sessions exist, create one
-        await createSession();
-      }
-    };
-    restoreSession();
-  }, [fetchSessions]);
-
-  // ── Save session to localStorage when changed ──
-  useEffect(() => {
-    if (session) {
-      localStorage.setItem("lora_session_id", session.id);
-    }
-  }, [session]);
-
-  // ── Keep prevSessionStateRef in sync (for transition detection in polling) ──
-  useEffect(() => {
-    if (session) {
-      prevSessionStateRef.current = session.state;
-    }
-  }, [session?.id]);  // reset ref only when session changes, not on every state poll
 
   // ── Scroll to bottom ──
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
-
-  // ── QA Review functions ──
-  const fetchQaItems = async (retries = 5, delayMs = 1500) => {
-    if (!session) return;
-    setQaLoading(true);
-    for (let attempt = 0; attempt < retries; attempt++) {
-      try {
-        const resp = await fetch(`${API_URL}/sessions/${session.id}/qa`);
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.length > 0) {
-            setQaItems(data);
-            setQaCurrentIndex(0);
-            setQaLoading(false);
-            return;
-          }
-        }
-      } catch (e) {
-        console.error("QA fetch error:", e);
-      }
-      if (attempt < retries - 1) {
-        await new Promise((res) => setTimeout(res, delayMs));
-      }
-    }
-    setQaLoading(false);
-  };
-
-  const updateQaItem = async (id: string, updates: {question?: string; answer?: string; validated?: boolean}) => {
-    if (!session) return;
-    try {
-      await fetch(`${API_URL}/sessions/${session.id}/qa/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      });
-      await fetchQaItems();
-    } catch {}
-  };
-
-  const deleteQaItem = async (id: string) => {
-    if (!session) return;
-    try {
-      await fetch(`${API_URL}/sessions/${session.id}/qa/${id}`, { method: "DELETE" });
-      const newItems = qaItems.filter(item => item.id !== id);
-      setQaItems(newItems);
-      setQaCurrentIndex(prev => Math.min(prev, Math.max(0, newItems.length - 1)));
-      setQaDeleteConfirm(false);
-    } catch {}
-  };
-
-  const saveCurrentCard = async () => {
-    const item = qaItems[qaCurrentIndex];
-    if (!item) return;
-    await updateQaItem(item.id, { question: item.question, answer: item.answer });
-  };
-
-  const navigateTo = (direction: "prev" | "next") => {
-    const item = qaItems[qaCurrentIndex];
-    if (item?.edited) {
-      setQaUnsavedConfirm(direction);
-      return;
-    }
-    if (direction === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
-    else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
-  };
-
-  const markAllValidated = async () => {
-    if (!session) return;
-    try {
-      await fetch(`${API_URL}/sessions/${session.id}/qa/validate-mark`, {
-        method: "POST",
-      });
-      await fetchQaItems();
-    } catch {}
-  };
-
-  const openQaReview = () => {
-    setQaReviewOpen(true);
-    setQaDeleteConfirm(false);
-    setQaUnsavedConfirm(null);
-    fetchQaItems();
-  };
-
-  // Auto-open QA modal when session enters VALIDATING state
-  useEffect(() => {
-    if (session?.state === "VALIDATING" && !qaReviewOpen) {
-      openQaReview();
-    }
-  }, [session?.state]);
-
-  // ── Poll diagnostics ──
-  useEffect(() => {
-    const poll = async () => {
-      await Promise.all([fetchHealth(), fetchTrainStatus(), fetchOutputFiles(), fetchAdapters()]);
-      setLastPoll(new Date());
-    };
-    poll();
-    const id = setInterval(poll, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  // ── Poll session state while not ACTIVE ──
-  useEffect(() => {
-    if (!session) return;
-    if (["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "READY", "FAILED"].includes(session.state)) {
-      setPollActive(false);
-      return;
-    }
-
-    setPollActive(true);
-    const id = setInterval(async () => {
-      try {
-        const resp = await fetch(`${API_URL}/sessions/${session.id}`);
-        if (resp.ok) {
-          const data: Session = await resp.json();
-          const prev = prevSessionStateRef.current;
-
-          // Inject a system message when session first enters FAILED
-          if (data.state === "FAILED" && prev !== "FAILED") {
-            const reason = data.failure_reason ?? "An unknown error occurred.";
-            setMessages((msgs) => [
-              ...msgs,
-              {
-                role: "system",
-                content: `Training failed: ${reason} You can keep chatting or type /sleep to retry fine-tuning.`,
-              },
-            ]);
-          }
-
-          // Inject a system message when session first enters INSUFFICIENT_DATA
-          if (data.state === "INSUFFICIENT_DATA" && prev !== "INSUFFICIENT_DATA") {
-            setMessages((msgs) => [
-              ...msgs,
-              {
-                role: "system",
-                content:
-                  "Not enough usable training data was found (at least 10 good examples are needed). Keep chatting to add more — type /sleep again when you're ready to retry fine-tuning.",
-              },
-            ]);
-          }
-
-          prevSessionStateRef.current = data.state;
-          setSession(data);
-          if (["READY", "FAILED", "ACTIVE"].includes(data.state)) {
-            setPollActive(false);
-          }
-        }
-      } catch {}
-    }, 3000);
-    return () => clearInterval(id);
-  }, [session?.id, session?.state]);
 
   // ── Fetch helpers ──
   const fetchHealth = async () => {
@@ -719,47 +495,147 @@ export default function ChatPage() {
     } catch {}
   };
 
+  const fetchQaCount = useCallback(async (sessionId: string) => {
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/count`, { signal: AbortSignal.timeout(4000) });
+      if (resp.ok) setQaCount(await resp.json());
+    } catch {}
+  }, []);
+
   const fetchAdapters = async () => {
     const defaultAdapter = { id: "base", version: "Base model", path: "", is_base: true, trained_at: null };
-    console.log("Fetching adapters from", MODEL_SERVER_URL);
     try {
       const resp = await fetch(`${MODEL_SERVER_URL}/adapters`, { signal: AbortSignal.timeout(4000) });
-      console.log("Model server response:", resp.status, resp.ok);
       if (resp.ok) {
         const data = await resp.json();
-        console.log("Model server data:", data);
-        const fetchedAdapters = data.adapters || [];
-        // Filter out base, keep everything else
-        const filtered = fetchedAdapters.filter((a: Adapter) => a.id !== "base");
-        console.log("Filtered adapters:", filtered);
-        if (filtered.length > 0) {
-          setAdapters([defaultAdapter, ...filtered]);
-          return;
-        }
+        const filtered = (data.adapters || []).filter((a: Adapter) => a.id !== "base");
+        if (filtered.length > 0) { setAdapters([defaultAdapter, ...filtered]); return; }
       }
-    } catch (e) { console.log("Model server adapters error:", e); }
-    console.log("Fetching adapters from", API_URL);
+    } catch {}
     try {
       const resp = await fetch(`${API_URL}/adapters`, { signal: AbortSignal.timeout(4000) });
-      console.log("Backend response:", resp.status, resp.ok);
       if (resp.ok) {
         const data = await resp.json();
-        console.log("Backend data:", data);
-        const fetchedAdapters = data.adapters || [];
-        // Filter out base
-        const filtered = fetchedAdapters.filter((a: Adapter) => a.id !== "base");
-        console.log("Filtered adapters:", filtered);
-        if (filtered.length > 0) {
-          setAdapters([defaultAdapter, ...filtered]);
-          return;
-        }
+        const filtered = (data.adapters || []).filter((a: Adapter) => a.id !== "base");
+        if (filtered.length > 0) { setAdapters([defaultAdapter, ...filtered]); return; }
       }
-    } catch (e) { console.log("Backend adapters error:", e); }
-    console.log("Using default adapter only");
+    } catch {}
     setAdapters([defaultAdapter]);
   };
 
-  const createSession = async (adapterId?: string) => {
+  // ── Load sessions list ──
+  const fetchSessions = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_URL}/sessions?limit=20`);
+      if (resp.ok) {
+        const data = await resp.json();
+        const list: Session[] = Array.isArray(data) ? data : (data.sessions ?? []);
+        setSessions(list);
+        return list;
+      }
+    } catch {}
+    return [];
+  }, []);
+
+  // ── Load turns with QA pairs ──
+  const fetchTurns = useCallback(async (sessionId: string) => {
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/turns`);
+      if (!resp.ok) return;
+      const turns: { role: "user" | "assistant" | "system"; content: string; id: string; qa_pairs?: QAPair[] }[] = await resp.json();
+      if (turns.length > 0) {
+        setMessages(turns.map((t) => ({
+          role: t.role,
+          content: t.content,
+          id: t.id,
+          qaPairs: t.qa_pairs && t.qa_pairs.length > 0 ? t.qa_pairs : undefined,
+        })));
+      }
+    } catch {}
+  }, []);
+
+  // ── Restore session on mount ──
+  useEffect(() => {
+    const restore = async () => {
+      const savedId = localStorage.getItem("lora_session_id");
+      const allSessions = await fetchSessions();
+      if (savedId && allSessions.length > 0) {
+        const found = allSessions.find(s => s.id === savedId);
+        if (found) {
+          setSession(found);
+          await fetchTurns(found.id);
+          await fetchQaCount(found.id);
+          return;
+        }
+      }
+      const target = allSessions.find(s => !["READY", "FAILED"].includes(s.state)) ?? allSessions[0];
+      if (target) {
+        setSession(target);
+        await fetchTurns(target.id);
+        await fetchQaCount(target.id);
+      } else {
+        await createSession();
+      }
+    };
+    restore();
+  }, [fetchSessions]);
+
+  useEffect(() => {
+    if (session) localStorage.setItem("lora_session_id", session.id);
+  }, [session]);
+
+  useEffect(() => {
+    if (session) prevSessionStateRef.current = session.state;
+  }, [session?.id]);
+
+  // ── Poll diagnostics ──
+  useEffect(() => {
+    const poll = async () => {
+      await Promise.all([fetchHealth(), fetchTrainStatus(), fetchOutputFiles(), fetchAdapters()]);
+      setLastPoll(new Date());
+    };
+    poll();
+    const id = setInterval(poll, POLL_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Poll QA count when session is active ──
+  useEffect(() => {
+    if (!session) return;
+    fetchQaCount(session.id);
+    const id = setInterval(() => fetchQaCount(session.id), 10000);
+    return () => clearInterval(id);
+  }, [session?.id]);
+
+  // ── Poll session state while training/evaluating/deploying ──
+  useEffect(() => {
+    if (!session) return;
+    if (["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "READY", "FAILED"].includes(session.state)) return;
+
+    const id = setInterval(async () => {
+      try {
+        const resp = await fetch(`${API_URL}/sessions/${session.id}`);
+        if (resp.ok) {
+          const data: Session = await resp.json();
+          const prev = prevSessionStateRef.current;
+          if (data.state === "FAILED" && prev !== "FAILED") {
+            const reason = data.failure_reason ?? "An unknown error occurred.";
+            setMessages((msgs) => [...msgs, { role: "system", content: `Training failed: ${reason} You can keep chatting or type /sleep to retry.` }]);
+          }
+          if (data.state === "READY" && prev !== "READY") {
+            setMessages((msgs) => [...msgs, { role: "system", content: "Training complete! A new adapter is live. Start a new session to use it." }]);
+          }
+          prevSessionStateRef.current = data.state;
+          setSession(data);
+          if (["READY", "FAILED", "ACTIVE"].includes(data.state)) fetchAdapters();
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(id);
+  }, [session?.id, session?.state]);
+
+  // ── Create session ──
+  const createSession = useCallback(async (adapterId?: string) => {
     if (adapterId && adapterId !== "base") {
       try {
         await fetch(`${API_URL}/load_adapter`, {
@@ -777,9 +653,7 @@ export default function ChatPage() {
         });
       } catch {}
     }
-    if (adapterId) {
-      setSelectedAdapter(adapterId);
-    }
+    if (adapterId) setSelectedAdapter(adapterId);
     try {
       const body: Record<string, string> = {};
       if (adapterId) body.adapter_id = adapterId;
@@ -794,13 +668,39 @@ export default function ChatPage() {
       const data: Session = await resp.json();
       setSession(data);
       setMessages([]);
+      setQaCount(null);
       setError(null);
       await fetchSessions();
     } catch {
       setError("Could not create session. Is the backend running?");
     }
-  };
+  }, [systemPrompt, trainingSystemPrompt, fetchSessions]);
 
+  // ── Update a QA pair in local message state ──
+  const handleQAUpdate = useCallback((turnId: string | undefined, qaId: string, updates: Partial<QAPair>) => {
+    setMessages((prev) => prev.map((msg) => {
+      if (!msg.qaPairs) return msg;
+      if (turnId && msg.id !== turnId) return msg;
+      return {
+        ...msg,
+        qaPairs: msg.qaPairs.map((qa) => qa.id === qaId ? { ...qa, ...updates } : qa),
+      };
+    }));
+    // Refresh count after validation change
+    if (updates.validated !== undefined && session) fetchQaCount(session.id);
+  }, [session, fetchQaCount]);
+
+  // ── Delete a QA pair from local message state ──
+  const handleQADelete = useCallback((turnId: string | undefined, qaId: string) => {
+    setMessages((prev) => prev.map((msg) => {
+      if (!msg.qaPairs) return msg;
+      if (turnId && msg.id !== turnId) return msg;
+      return { ...msg, qaPairs: msg.qaPairs.filter((qa) => qa.id !== qaId) };
+    }));
+    if (session) fetchQaCount(session.id);
+  }, [session, fetchQaCount]);
+
+  // ── Send message ──
   const sendMessage = useCallback(async () => {
     if (!input.trim() || !session || loading) return;
     if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state)) return;
@@ -809,8 +709,44 @@ export default function ChatPage() {
     setInput("");
     setLoading(true);
     setError(null);
-    setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
-    setMessages((prev) => [...prev, { role: "assistant", content: "", streaming: true }]);
+
+    // Add user message with a placeholder synthesis loading indicator
+    const userMsgObj: Message = { role: "user", content: userMsg, synthLoading: true };
+    setMessages((prev) => [...prev, userMsgObj]);
+
+    // Handle /sleep command
+    if (userMsg.trim() === "/sleep") {
+      try {
+        const resp = await fetch(`${API_URL}/sessions/${session.id}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: userMsg }),
+        });
+        if (resp.ok && resp.body) {
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const raw = decoder.decode(value, { stream: true });
+            for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
+              try {
+                const event = JSON.parse(line.slice(6));
+                if (["sleeping", "sleep_ack", "validating"].includes(event.type)) {
+                  const msg = event.message ?? "Training pipeline started.";
+                  setMessages((prev) => [...prev.slice(0, -1), { ...prev[prev.length - 1], synthLoading: false }, { role: "system", content: msg }]);
+                  setSession((prev) => prev ? { ...prev, state: event.type === "validating" ? "VALIDATING" : "TRAINING" } : prev);
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch {
+        setError("Request failed.");
+      }
+      setLoading(false);
+      return;
+    }
 
     try {
       const resp = await fetch(`${API_URL}/sessions/${session.id}/chat`, {
@@ -820,9 +756,9 @@ export default function ChatPage() {
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
-      const reader  = resp.body.getReader();
+      const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      let assistantText = "";
+      let newPairs: QAPair[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -831,30 +767,23 @@ export default function ChatPage() {
         for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
           try {
             const event = JSON.parse(line.slice(6));
-            if (event.type === "chunk") {
-              assistantText += event.text;
-              setMessages((prev) => {
-                const copy = [...prev];
-                copy[copy.length - 1] = { role: "assistant", content: assistantText, streaming: true };
-                return copy;
+            if (event.type === "qa_pairs") {
+              newPairs = event.pairs ?? [];
+            }
+            if (event.type === "qa_count") {
+              setQaCount({
+                total_count: event.total,
+                validated_count: event.validated,
+                min_required: event.min_required,
+                ready_to_train: event.ready,
               });
             }
-            if (event.type === "status") {
-              setSession((prev) => prev ? {
-                ...prev,
-                state: event.session_state ?? prev.state,
-                total_tokens: prev.max_tokens - (event.remaining_tokens ?? 0),
-              } : prev);
-            }
-            if (["sleeping", "sleep_ack", "sleep_warning"].includes(event.type)) {
-              setMessages((prev) => [...prev, { role: "system", content: event.message ?? "Session sleeping." }]);
-              setSession((prev) => prev ? { ...prev, state: "SLEEPING" } : prev);
-            }
             if (event.type === "end") {
+              // Update the last user message with the synthesised QA pairs and remove loading indicator
               setMessages((prev) => {
                 const copy = [...prev];
-                if (copy[copy.length - 1]?.streaming)
-                  copy[copy.length - 1] = { ...copy[copy.length - 1], streaming: false };
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], synthLoading: false, qaPairs: newPairs.length > 0 ? newPairs : undefined };
                 return copy;
               });
             }
@@ -863,11 +792,36 @@ export default function ChatPage() {
       }
     } catch {
       setError("Request failed — check backend connection.");
-      setMessages((prev) => prev.filter((m) => !m.streaming));
+      setMessages((prev) => {
+        const copy = [...prev];
+        if (copy.length > 0) copy[copy.length - 1] = { ...copy[copy.length - 1], synthLoading: false };
+        return copy;
+      });
     } finally {
       setLoading(false);
     }
   }, [input, session, loading]);
+
+  // ── Start Training ──
+  const handleStartTraining = useCallback(async () => {
+    if (!session || startingTraining) return;
+    setStartingTraining(true);
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${session.id}/start-training`, { method: "POST" });
+      if (resp.ok) {
+        setSession((prev) => prev ? { ...prev, state: "TRAINING" } : prev);
+        setMessages((prev) => [...prev, { role: "system", content: "Training started! The model is being fine-tuned on your Q&A pairs. Check the diagnostics panel for progress." }]);
+        await fetchSessions();
+        await fetchTrainStatus();
+      } else {
+        const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
+        setError(`Could not start training: ${err.detail ?? resp.status}`);
+      }
+    } catch {
+      setError("Could not start training — check backend connection.");
+    }
+    setStartingTraining(false);
+  }, [session, startingTraining, fetchSessions]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -875,6 +829,11 @@ export default function ChatPage() {
 
   const isAcceptingInput = session &&
     ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state) && !loading;
+
+  const canStartTraining = !!(qaCount?.ready_to_train) && session &&
+    ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED", "VALIDATING"].includes(session.state) &&
+    !startingTraining;
+
   const tokenPct = session ? Math.min((session.total_tokens / session.max_tokens) * 100, 100) : 0;
 
   return (
@@ -893,7 +852,9 @@ export default function ChatPage() {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-4">
+
+          <div className="flex items-center gap-3">
+            {/* Session selector */}
             <div className="flex items-center gap-1">
               <select
                 key={sessions.length}
@@ -903,135 +864,153 @@ export default function ChatPage() {
                   if (s) {
                     setSession(s);
                     await fetchTurns(s.id);
+                    await fetchQaCount(s.id);
                   }
                 }}
                 className="text-xs px-2 py-1.5 rounded-md border border-gray-300 bg-white text-gray-700"
               >
                 {!session && <option value="">No session</option>}
-                {(sessions || []).map((s) => (
+                {sessions.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {STATE_LABELS[s.state].replace(/[^\w]/g, "")} {s.id.slice(0,8)}
+                    {STATE_LABELS[s.state].replace(/[^\w\s]/g, "").trim()} {s.id.slice(0, 8)}
                   </option>
                 ))}
               </select>
-              <button
-                onClick={fetchSessions}
-                className="text-xs px-2 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600"
-                title="Refresh sessions"
-              >
-                ↻
-              </button>
+              <button onClick={fetchSessions} className="text-xs px-2 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-600" title="Refresh sessions">↻</button>
             </div>
+
+            {/* Token gauge */}
             {session && (
               <div className="flex items-center gap-2 text-xs text-gray-500">
-                <span>{session.total_tokens} / {session.max_tokens} tokens</span>
-                <div className="w-28 h-2 bg-gray-200 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all ${
-                      tokenPct > 85 ? "bg-red-400" : tokenPct > 70 ? "bg-yellow-400" : "bg-blue-400"
-                    }`}
-                    style={{ width: `${tokenPct}%` }}
-                  />
+                <span>{session.total_tokens} / {session.max_tokens}</span>
+                <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${tokenPct > 85 ? "bg-red-400" : tokenPct > 70 ? "bg-yellow-400" : "bg-blue-400"}`} style={{ width: `${tokenPct}%` }} />
                 </div>
               </div>
             )}
+
+            {/* Start Training button */}
+            {session && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={handleStartTraining}
+                  disabled={!canStartTraining}
+                  title={!qaCount?.ready_to_train
+                    ? `Need ${(qaCount?.min_required ?? MIN_TRAINING_SAMPLES) - (qaCount?.validated_count ?? 0)} more validated Q&A pairs`
+                    : "Start training the model on your Q&A pairs"}
+                  className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                    canStartTraining
+                      ? "bg-green-600 hover:bg-green-700 text-white"
+                      : "bg-gray-100 text-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  {startingTraining
+                    ? "Starting…"
+                    : qaCount
+                    ? `Start Training (${qaCount.validated_count}/${qaCount.min_required})`
+                    : "Start Training"}
+                </button>
+              </div>
+            )}
+
+            {/* New session dropdown */}
             <div className="relative">
-              <button 
-                onClick={() => {
-                  const dd = document.getElementById('new-session-dd');
-                  dd?.classList.toggle('hidden');
-                }}
+              <button
+                onClick={() => document.getElementById("new-session-dd")?.classList.toggle("hidden")}
                 className="text-xs px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-700 text-white transition-colors"
               >
                 New session ▾
               </button>
               <div id="new-session-dd" className="hidden absolute right-0 top-full mt-1 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-3 space-y-2">
                 <div className="text-xs text-gray-500 font-medium">Chat system prompt (optional)</div>
-                <textarea
-                  value={systemPrompt}
-                  onChange={(e) => setSystemPrompt(e.target.value)}
-                  placeholder="You are a helpful AI assistant..."
-                  className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none"
-                  rows={2}
-                />
+                <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} placeholder="You are a helpful AI assistant..." className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none" rows={2} />
                 <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Training system prompt (optional)</div>
-                <textarea
-                  value={trainingSystemPrompt}
-                  onChange={(e) => setTrainingSystemPrompt(e.target.value)}
-                  placeholder="Prompt used when training the model..."
-                  className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none"
-                  rows={2}
-                />
+                <textarea value={trainingSystemPrompt} onChange={(e) => setTrainingSystemPrompt(e.target.value)} placeholder="Prompt used when training the model..." className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none" rows={2} />
                 <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Select adapter</div>
-                <button
-                  onClick={() => { createSession("base"); document.getElementById('new-session-dd')?.classList.add('hidden'); }}
-                  className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded"
-                >
-                  Base model
-                </button>
+                <button onClick={() => { createSession("base"); document.getElementById("new-session-dd")?.classList.add("hidden"); }} className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded">Base model</button>
                 {adapters.filter(a => a.id !== "base").map((a) => (
-                  <button
-                    key={a.id}
-                    onClick={() => { createSession(a.id); document.getElementById('new-session-dd')?.classList.add('hidden'); }}
-                    className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded"
-                  >
+                  <button key={a.id} onClick={() => { createSession(a.id); document.getElementById("new-session-dd")?.classList.add("hidden"); }} className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded">
                     {a.version}{a.is_current ? " (live)" : ""}
                   </button>
                 ))}
               </div>
             </div>
-            {session && ["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED", "VALIDATING"].includes(session.state) && (
-              <button
-                onClick={openQaReview}
-                className="text-xs px-3 py-1.5 rounded-md bg-purple-600 hover:bg-purple-700 text-white transition-colors"
-                title="Review and validate training data"
-              >
-                Review Training Data
-              </button>
-            )}
-            <button
-              onClick={() => setPanelOpen((v) => !v)}
-              className="text-xs px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors"
-              title="Toggle diagnostics panel"
-            >
+
+            <button onClick={() => setPanelOpen((v) => !v)} className="text-xs px-3 py-1.5 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors" title="Toggle diagnostics panel">
               {panelOpen ? "Hide panel" : "Show panel"}
             </button>
           </div>
         </header>
 
         {/* Messages */}
-        <main className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
-          <div className="max-w-3xl mx-auto w-full space-y-4">
+        <main className="flex-1 overflow-y-auto px-4 py-6">
+          <div className="max-w-3xl mx-auto w-full space-y-6">
             {messages.length === 0 && !error && (
-              <p className="text-center text-gray-400 text-sm mt-16">
-                Start chatting. Type{" "}
-                <code className="bg-gray-100 px-1 rounded">/sleep</code> to end the session and trigger fine-tuning.
-              </p>
+              <div className="text-center text-gray-400 text-sm mt-16 space-y-2">
+                <p className="font-medium text-gray-500">Send a passage to generate training data</p>
+                <p className="text-xs">Each message you send will be used to generate Q&A pairs for fine-tuning.<br />
+                  When you have {MIN_TRAINING_SAMPLES}+ validated pairs, the <span className="font-medium text-green-700">Start Training</span> button will activate.</p>
+                <p className="text-xs text-gray-400 mt-3">Type <code className="bg-gray-100 px-1 rounded">/sleep</code> to immediately start training with all current Q&A pairs.</p>
+              </div>
             )}
             {error && (
-              <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-lg">
-                {error}
-              </div>
+              <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-lg">{error}</div>
             )}
             {messages.map((msg, i) => {
               if (msg.role === "system") {
+                return <div key={i} className="text-center text-sm text-gray-500 italic py-1">{msg.content}</div>;
+              }
+              if (msg.role === "user") {
                 return (
-                  <div key={i} className="text-center text-sm text-gray-500 italic py-2">
-                    {msg.content}
+                  <div key={i} className="space-y-1">
+                    {/* User bubble */}
+                    <div className="flex justify-end">
+                      <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-br-sm text-sm leading-relaxed whitespace-pre-wrap bg-blue-600 text-white">
+                        {msg.content}
+                      </div>
+                    </div>
+                    {/* Synthesis loading indicator */}
+                    {msg.synthLoading && (
+                      <div className="flex justify-end">
+                        <div className="flex items-center gap-2 text-xs text-gray-400 px-2">
+                          <svg className="animate-spin h-3.5 w-3.5 text-blue-400" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                          </svg>
+                          Generating Q&A pairs…
+                        </div>
+                      </div>
+                    )}
+                    {/* Inline QA cards */}
+                    {msg.qaPairs && msg.qaPairs.length > 0 && session && (
+                      <div className="max-w-[80%] ml-auto space-y-1">
+                        <p className="text-xs text-gray-400 text-right px-1">{msg.qaPairs.length} Q&A pair{msg.qaPairs.length !== 1 ? "s" : ""} generated</p>
+                        {msg.qaPairs.map((qa) => (
+                          <QACard
+                            key={qa.id}
+                            pair={qa}
+                            sessionId={session.id}
+                            onUpdate={(id, updates) => handleQAUpdate(msg.id, id, updates)}
+                            onDelete={(id) => handleQADelete(msg.id, id)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* No pairs generated */}
+                    {!msg.synthLoading && msg.qaPairs && msg.qaPairs.length === 0 && (
+                      <div className="flex justify-end">
+                        <p className="text-xs text-gray-400 px-2">No Q&A pairs could be generated for this passage.</p>
+                      </div>
+                    )}
                   </div>
                 );
               }
+              // assistant messages (from /sleep ack etc) should not normally appear in new flow
               return (
-                <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className={`max-w-[75%] px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
-                    msg.role === "user"
-                      ? "bg-blue-600 text-white rounded-br-sm"
-                      : "bg-white border border-gray-200 text-gray-800 rounded-bl-sm shadow-sm"
-                  } ${msg.streaming ? "opacity-90" : ""}`}>
+                <div key={i} className="flex justify-start">
+                  <div className="max-w-[75%] px-4 py-3 rounded-2xl rounded-bl-sm text-sm leading-relaxed whitespace-pre-wrap bg-white border border-gray-200 text-gray-800 shadow-sm">
                     {msg.content}
-                    {msg.streaming && (
-                      <span className="inline-block w-1 h-4 ml-0.5 bg-current opacity-70 animate-pulse" />
-                    )}
+                    {msg.streaming && <span className="inline-block w-1 h-4 ml-0.5 bg-current opacity-70 animate-pulse" />}
                   </div>
                 </div>
               );
@@ -1048,47 +1027,41 @@ export default function ChatPage() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                session?.state === "INSUFFICIENT_DATA"
-                  ? "Type more messages to add training data… (/sleep when ready)"
-                  : session?.state === "FAILED"
-                  ? "Training failed — keep chatting or type /sleep to retry fine-tuning"
-                  : isAcceptingInput
-                  ? "Type a message… (Enter to send, /sleep to end session)"
-                  : ["SLEEPING","TRAINING","EVALUATING","DEPLOYING"].includes(session?.state ?? "")
-                  ? "Training in progress — check the panel →"
-                  : session?.state === "READY"
-                  ? "New adapter is live — start a new session!"
-                  : "Session closed"
+                !isAcceptingInput
+                  ? ["SLEEPING", "TRAINING", "EVALUATING", "DEPLOYING"].includes(session?.state ?? "")
+                    ? "Training in progress — check the panel →"
+                    : session?.state === "READY"
+                    ? "New adapter is live — start a new session!"
+                    : "Session closed"
+                  : "Paste a passage to generate Q&A training data… (Enter to send)"
               }
               disabled={!isAcceptingInput}
               rows={1}
-              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm
-                         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
-                         disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed
-                         max-h-40 overflow-y-auto"
+              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed max-h-48 overflow-y-auto"
               style={{ minHeight: "44px" }}
               onInput={(e) => {
                 const t = e.target as HTMLTextAreaElement;
                 t.style.height = "auto";
-                t.style.height = Math.min(t.scrollHeight, 160) + "px";
+                t.style.height = Math.min(t.scrollHeight, 192) + "px";
               }}
             />
-            <button onClick={sendMessage} disabled={!isAcceptingInput || !input.trim()}
-              className="px-5 py-3 rounded-xl bg-blue-600 text-white text-sm font-medium
-                         hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0">
+            <button
+              onClick={sendMessage}
+              disabled={!isAcceptingInput || !input.trim()}
+              className="px-5 py-3 rounded-xl bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            >
               {loading ? "…" : "Send"}
             </button>
           </div>
-          {session?.state === "PRE_SLEEP_WARNING" && (
-            <p className="text-center text-xs text-yellow-600 mt-2">
-              ⚠ Approaching token limit — session will close after your next reply.
+          {/* Training readiness hint */}
+          {session && qaCount && !qaCount.ready_to_train && qaCount.total_count > 0 && (
+            <p className="text-center text-xs text-amber-600 mt-2">
+              {qaCount.validated_count} of {qaCount.min_required} validated pairs needed to start training — validate Q&A cards above or send more passages.
             </p>
           )}
-          {session?.state === "INSUFFICIENT_DATA" && (
-            <p className="text-center text-xs text-orange-600 mt-2">
-              ⚠ Not enough training data — keep chatting to add more, then type{" "}
-              <code className="bg-orange-100 px-1 rounded">/sleep</code>{" "}
-              to trigger fine-tuning.
+          {session && qaCount?.ready_to_train && (
+            <p className="text-center text-xs text-green-600 mt-2">
+              {qaCount.validated_count} validated pairs ready — click <span className="font-medium">Start Training</span> when you&apos;re happy with the data.
             </p>
           )}
         </footer>
@@ -1103,288 +1076,11 @@ export default function ChatPage() {
           lastPoll={lastPoll}
           selectedAdapter={selectedAdapter}
           adapters={adapters}
+          qaCount={qaCount}
           onRestartTraining={fetchTrainStatus}
         />
       )}
 
-      {/* ── QA Review Modal ── */}
-      {qaReviewOpen && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
-
-            {/* Header */}
-            <div className="px-5 py-4 border-b">
-              <div className="flex items-start justify-between">
-                <div>
-                  <h2 className="font-semibold text-gray-800 text-base">Review Training Data</h2>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {qaLoading
-                      ? "Loading Q&A pairs…"
-                      : qaItems.length === 0
-                      ? "No training data to review yet."
-                      : `Review ${qaItems.length} generated Q&A pair${qaItems.length !== 1 ? "s" : ""} before training begins.`}
-                  </p>
-                </div>
-                <button
-                  onClick={() => setQaReviewOpen(false)}
-                  className="text-gray-400 hover:text-gray-600 text-lg leading-none ml-4 mt-0.5"
-                  title="Close"
-                >✕</button>
-              </div>
-
-              {/* Progress bar */}
-              {!qaLoading && qaItems.length > 0 && (() => {
-                const validatedCount = qaItems.filter(q => q.validated).length;
-                const pct = Math.round((validatedCount / qaItems.length) * 100);
-                return (
-                  <div className="mt-3 space-y-1">
-                    <div className="flex items-center justify-between text-xs text-gray-500">
-                      <span className="font-medium text-gray-700">{qaCurrentIndex + 1} / {qaItems.length}</span>
-                      <span>{validatedCount} of {qaItems.length} validated</span>
-                    </div>
-                    <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-green-500 rounded-full transition-all duration-300"
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Body */}
-            <div className="flex-1 overflow-y-auto p-5">
-              {qaLoading ? (
-                <div className="flex items-center justify-center py-12 text-gray-400 text-sm">
-                  <svg className="animate-spin h-5 w-5 mr-2 text-gray-400" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                  </svg>
-                  Loading training data…
-                </div>
-              ) : qaItems.length === 0 ? (
-                <p className="text-center text-gray-500 py-10 text-sm">No training data to review yet.</p>
-              ) : (() => {
-                const item = qaItems[qaCurrentIndex];
-
-                /* ── Unsaved-changes guard ── */
-                if (qaUnsavedConfirm) {
-                  return (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-5 space-y-4">
-                      <p className="text-sm font-medium text-amber-800">You have unsaved changes on this entry.</p>
-                      <p className="text-xs text-amber-700">Would you like to save them before moving on, or discard them?</p>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={async () => {
-                            await saveCurrentCard();
-                            const dir = qaUnsavedConfirm;
-                            setQaUnsavedConfirm(null);
-                            if (dir === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
-                            else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
-                          }}
-                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
-                        >
-                          Save &amp; Continue
-                        </button>
-                        <button
-                          onClick={async () => {
-                            const dir = qaUnsavedConfirm;
-                            setQaUnsavedConfirm(null);
-                            await fetchQaItems();
-                            if (dir === "prev") setQaCurrentIndex(i => Math.max(0, i - 1));
-                            else setQaCurrentIndex(i => Math.min(qaItems.length - 1, i + 1));
-                          }}
-                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium"
-                        >
-                          Discard &amp; Continue
-                        </button>
-                        <button
-                          onClick={() => setQaUnsavedConfirm(null)}
-                          className="text-sm px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-600"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  );
-                }
-
-                /* ── Delete confirmation ── */
-                if (qaDeleteConfirm) {
-                  return (
-                    <div className="rounded-lg border border-red-200 bg-red-50 p-5 space-y-4">
-                      <p className="text-sm font-medium text-red-800">Delete this entry?</p>
-                      <p className="text-xs text-red-700">This Q&amp;A pair will be permanently removed from your training data. This cannot be undone.</p>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => deleteQaItem(item.id)}
-                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium"
-                        >
-                          Yes, delete it
-                        </button>
-                        <button
-                          onClick={() => setQaDeleteConfirm(false)}
-                          className="flex-1 text-sm px-3 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  );
-                }
-
-                /* ── Card ── */
-                const isValidated = item.validated;
-                const needsReview = !isValidated && item.retry_count >= 3;
-                const isPending   = !isValidated && item.retry_count < 3;
-
-                return (
-                  <div className={`rounded-lg border-l-4 border bg-white shadow-sm ${isValidated ? "border-l-green-500 border-green-200" : needsReview ? "border-l-amber-400 border-amber-200" : "border-l-gray-300 border-gray-200"}`}>
-                    {/* Card header: status badge */}
-                    <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100">
-                      <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${isValidated ? "bg-green-100 text-green-700" : needsReview ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>
-                        {isValidated ? "✓ Validated" : needsReview ? "⚠ Needs review" : "Pending"}
-                      </span>
-                      {item.edited && (
-                        <span className="text-xs text-amber-600 font-medium flex items-center gap-1">
-                          <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400"/>
-                          Unsaved changes
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="p-4 space-y-4">
-                      {/* Question */}
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Question</label>
-                        <textarea
-                          value={item.question}
-                          onChange={(e) => {
-                            const newItems = [...qaItems];
-                            newItems[qaCurrentIndex] = { ...newItems[qaCurrentIndex], question: e.target.value, edited: true };
-                            setQaItems(newItems);
-                          }}
-                          className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
-                          rows={3}
-                        />
-                      </div>
-
-                      {/* Answer */}
-                      <div>
-                        <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Answer</label>
-                        <textarea
-                          value={item.answer}
-                          onChange={(e) => {
-                            const newItems = [...qaItems];
-                            newItems[qaCurrentIndex] = { ...newItems[qaCurrentIndex], answer: e.target.value, edited: true };
-                            setQaItems(newItems);
-                          }}
-                          className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
-                          rows={6}
-                        />
-                      </div>
-
-                      {/* Save button — only visible when unsaved */}
-                      {item.edited && (
-                        <div className="flex justify-end">
-                          <button
-                            onClick={saveCurrentCard}
-                            className="text-xs px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition-colors"
-                          >
-                            Save changes
-                          </button>
-                        </div>
-                      )}
-
-                      {/* Validator notes */}
-                      {item.validation_notes && (
-                        <div className="bg-gray-50 rounded-lg px-3 py-2.5 border border-gray-100">
-                          <p className="text-xs font-semibold text-gray-500 mb-1 uppercase tracking-wide">Automated validator notes</p>
-                          <p className="text-xs text-gray-600">{item.validation_notes}</p>
-                        </div>
-                      )}
-
-                      {/* Mark validated */}
-                      {!isValidated && (
-                        <button
-                          onClick={() => updateQaItem(item.id, { validated: true })}
-                          className="w-full text-sm px-3 py-2 rounded-lg bg-green-50 hover:bg-green-100 text-green-700 font-medium border border-green-200 transition-colors"
-                        >
-                          Mark as Validated
-                        </button>
-                      )}
-                      {isValidated && (
-                        <button
-                          onClick={() => updateQaItem(item.id, { validated: false })}
-                          className="w-full text-sm px-3 py-2 rounded-lg bg-gray-50 hover:bg-gray-100 text-gray-500 font-medium border border-gray-200 transition-colors"
-                        >
-                          Unmark validation
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Navigation row */}
-            {!qaLoading && qaItems.length > 0 && !qaUnsavedConfirm && !qaDeleteConfirm && (
-              <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50 rounded-b-none">
-                <button
-                  onClick={() => navigateTo("prev")}
-                  disabled={qaCurrentIndex === 0}
-                  className="text-sm px-4 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed font-medium transition-colors"
-                >
-                  ← Previous
-                </button>
-                <button
-                  onClick={() => { setQaDeleteConfirm(true); }}
-                  className="text-sm px-3 py-1.5 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700 border border-transparent hover:border-red-200 font-medium transition-colors"
-                >
-                  Delete entry
-                </button>
-                <button
-                  onClick={() => navigateTo("next")}
-                  disabled={qaCurrentIndex === qaItems.length - 1}
-                  className="text-sm px-4 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed font-medium transition-colors"
-                >
-                  Next →
-                </button>
-              </div>
-            )}
-
-            {/* Footer */}
-            <div className="flex items-center justify-between px-5 py-3 border-t">
-              <button
-                onClick={() => setQaReviewOpen(false)}
-                className="text-sm px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium transition-colors"
-              >
-                Close
-              </button>
-              <button
-                onClick={async () => {
-                  await markAllValidated();
-                  if (session) {
-                    try {
-                      const resp = await fetch(`${API_URL}/sessions/${session.id}/start-training`, { method: "POST" });
-                      if (resp.ok) {
-                        setQaReviewOpen(false);
-                        await fetchSessions();
-                        await fetchTrainStatus();
-                      }
-                    } catch {}
-                  }
-                }}
-                className="text-sm px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors"
-              >
-                Validate All &amp; Start Training
-              </button>
-            </div>
-
-          </div>
-        </div>
-      )}
       <HelpPanel />
     </div>
   );
