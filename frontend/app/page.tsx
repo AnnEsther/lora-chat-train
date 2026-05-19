@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { HelpPanel } from "@/app/components/HelpPanel";
-import QADeck, { type DeckMessage } from "@/app/components/QADeck";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MODEL_SERVER_URL = process.env.NEXT_PUBLIC_MODEL_SERVER_URL ?? "http://localhost:8001";
@@ -322,6 +321,365 @@ function DiagnosticPanel({
   );
 }
 
+// ── Inline QA deck ────────────────────────────────────────────────────────────
+
+function InlineDeck({
+  pairs,
+  sessionId,
+  turnId,
+  synthLoading,
+  segmentCount,
+  onUpdate,
+  onDelete,
+}: {
+  pairs: QAPair[];
+  sessionId: string;
+  turnId: string | undefined;
+  synthLoading: boolean;
+  segmentCount: number;
+  onUpdate: (qaId: string, updates: Partial<QAPair>) => void;
+  onDelete: (qaId: string) => void;
+}) {
+  const [cardIdx, setCardIdx]     = useState(0);
+  const [slideDir, setSlideDir]   = useState<"left" | "right" | null>(null);
+  const [animating, setAnimating] = useState(false);
+  const [editing, setEditing]     = useState(false);
+  const [question, setQuestion]   = useState("");
+  const [answer, setAnswer]       = useState("");
+  const [saving, setSaving]       = useState(false);
+  const [deleting, setDeleting]   = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const totalCards = synthLoading ? Math.max(pairs.length, segmentCount) : pairs.length;
+  const currentPair = pairs[cardIdx] ?? null;
+
+  // Clamp index when pairs arrive or get deleted
+  useEffect(() => {
+    if (cardIdx >= pairs.length && pairs.length > 0) {
+      setCardIdx(pairs.length - 1);
+    }
+  }, [pairs.length, cardIdx]);
+
+  // Sync edit buffers when the displayed card changes
+  useEffect(() => {
+    if (currentPair) {
+      setQuestion(currentPair.question);
+      setAnswer(currentPair.answer);
+    }
+    setEditing(false);
+    setConfirmDelete(false);
+    setSaving(false);
+    setDeleting(false);
+  }, [cardIdx, currentPair?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Also sync buffers if pair content changes from outside (session reload)
+  useEffect(() => {
+    if (currentPair && !editing) {
+      setQuestion(currentPair.question);
+      setAnswer(currentPair.answer);
+    }
+  }, [currentPair?.question, currentPair?.answer]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const goTo = useCallback((target: number, dir: "left" | "right") => {
+    if (animating || target === cardIdx) return;
+    setSlideDir(dir);
+    setAnimating(true);
+    setTimeout(() => {
+      setCardIdx(target);
+      setSlideDir(null);
+      setAnimating(false);
+    }, 260);
+  }, [animating, cardIdx]);
+
+  const goNext = useCallback(() => {
+    if (cardIdx + 1 < pairs.length) goTo(cardIdx + 1, "left");
+  }, [cardIdx, pairs.length, goTo]);
+
+  const goPrev = useCallback(() => {
+    if (cardIdx - 1 >= 0) goTo(cardIdx - 1, "right");
+  }, [cardIdx, goTo]);
+
+  const handleSave = useCallback(async () => {
+    if (!currentPair) return;
+    setSaving(true);
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${currentPair.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, answer }),
+      });
+      if (resp.ok) {
+        onUpdate(currentPair.id, { question, answer, edited: true });
+        setEditing(false);
+      }
+    } catch {}
+    setSaving(false);
+  }, [currentPair, sessionId, question, answer, onUpdate]);
+
+  const handleValidateToggle = useCallback(async () => {
+    if (!currentPair) return;
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${currentPair.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ validated: !currentPair.validated }),
+      });
+      if (resp.ok) onUpdate(currentPair.id, { validated: !currentPair.validated });
+    } catch {}
+  }, [currentPair, sessionId, onUpdate]);
+
+  const handleDelete = useCallback(async () => {
+    if (!currentPair) return;
+    setDeleting(true);
+    try {
+      await fetch(`${API_URL}/sessions/${sessionId}/qa/${currentPair.id}`, { method: "DELETE" });
+      onDelete(currentPair.id);
+    } catch {}
+    setDeleting(false);
+    setConfirmDelete(false);
+  }, [currentPair, sessionId, onDelete]);
+
+  // Keyboard nav — only fires when this deck's wrapper div is focused
+  const handleKeyDown = useCallback(async (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (editing) { await handleSave(); }
+      goNext();
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (editing) { await handleSave(); }
+      goPrev();
+    }
+  }, [editing, handleSave, goNext, goPrev]);
+
+  const isSkeletonSlot = !currentPair && synthLoading;
+
+  // Slide transform classes
+  const exitTranslate  = slideDir === "left"  ? "-translate-x-full" : slideDir === "right" ? "translate-x-full" : "translate-x-0";
+  const enterTranslate = slideDir === "left"  ? "translate-x-full"  : slideDir === "right" ? "-translate-x-full" : "translate-x-0";
+
+  return (
+    // tabIndex makes the div focusable so onKeyDown fires
+    <div
+      className="mt-2 outline-none focus-within:ring-2 focus-within:ring-blue-200 rounded-2xl"
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+    >
+      <div className="border border-gray-200 rounded-2xl bg-white shadow-sm overflow-hidden">
+
+        {/* ── Nav header ── */}
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-gray-50">
+          {/* Dot indicators */}
+          <div className="flex items-center gap-1.5">
+            {Array.from({ length: totalCards }).map((_, di) => (
+              <button
+                key={di}
+                onClick={() => di < pairs.length && goTo(di, di > cardIdx ? "left" : "right")}
+                disabled={di >= pairs.length}
+                className={`w-2 h-2 rounded-full transition-colors ${
+                  di === cardIdx
+                    ? "bg-blue-500"
+                    : di < pairs.length
+                    ? "bg-gray-300 hover:bg-gray-400 cursor-pointer"
+                    : "bg-gray-200 animate-pulse cursor-default"
+                }`}
+                title={di < pairs.length ? `Card ${di + 1}` : "Generating…"}
+              />
+            ))}
+          </div>
+
+          {/* Counter + loading status */}
+          <div className="flex items-center gap-2">
+            {synthLoading && (
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+              </span>
+            )}
+            <span className="text-xs text-gray-400 tabular-nums font-medium">
+              {totalCards > 0
+                ? synthLoading && pairs.length < segmentCount
+                  ? `${pairs.length} / ${segmentCount} generating…`
+                  : `${Math.min(cardIdx + 1, totalCards)} / ${totalCards}`
+                : "Generating…"}
+            </span>
+          </div>
+
+          {/* Prev / Next buttons */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={goPrev}
+              disabled={cardIdx === 0 || animating}
+              className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              ←
+            </button>
+            <button
+              onClick={goNext}
+              disabled={cardIdx >= pairs.length - 1 || animating}
+              className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              →
+            </button>
+          </div>
+        </div>
+
+        {/* ── Card area ── */}
+        <div className="relative overflow-hidden">
+          <div
+            className={`transition-transform duration-[260ms] ease-in-out ${animating ? exitTranslate + " opacity-0" : "translate-x-0 opacity-100"}`}
+          >
+            {isSkeletonSlot ? (
+              /* Skeleton */
+              <div className="px-5 py-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <div className="w-6 h-6 rounded-full bg-gray-200 animate-pulse flex-shrink-0 mt-0.5" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-3/5 rounded bg-gray-200 animate-pulse" />
+                    <div className="h-3 w-2/5 rounded bg-gray-200 animate-pulse" />
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <div className="w-6 h-6 rounded-full bg-gray-200 animate-pulse flex-shrink-0 mt-0.5" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
+                    <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
+                    <div className="h-3 w-3/5 rounded bg-gray-200 animate-pulse" />
+                  </div>
+                </div>
+              </div>
+            ) : currentPair ? (
+              /* Real card */
+              <div className="px-5 py-4 space-y-3">
+                {/* Question */}
+                <div className="flex items-start gap-3">
+                  <span className="w-6 h-6 rounded-full bg-gray-200 text-gray-500 text-xs font-bold flex items-center justify-center select-none flex-shrink-0 mt-0.5">Q</span>
+                  <div className="flex-1 min-w-0">
+                    {editing ? (
+                      <textarea
+                        value={question}
+                        onChange={(e) => setQuestion(e.target.value)}
+                        rows={2}
+                        className="w-full rounded-xl border-2 border-blue-300 focus:border-blue-500 bg-gray-50 px-3 py-2 text-sm leading-relaxed outline-none resize-none transition-colors"
+                      />
+                    ) : (
+                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                        currentPair.validated
+                          ? "bg-gray-50 border-l-4 border-green-400 border border-gray-100"
+                          : "bg-gray-50 border border-gray-200"
+                      }`}>
+                        {currentPair.question}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Answer */}
+                <div className="flex items-start gap-3">
+                  <span className="w-6 h-6 rounded-full bg-gray-300 text-gray-600 text-xs font-bold flex items-center justify-center select-none flex-shrink-0 mt-0.5">A</span>
+                  <div className="flex-1 min-w-0">
+                    {editing ? (
+                      <textarea
+                        value={answer}
+                        onChange={(e) => setAnswer(e.target.value)}
+                        rows={4}
+                        className="w-full rounded-xl border-2 border-blue-300 focus:border-blue-500 bg-white px-3 py-2 text-sm leading-relaxed outline-none resize-none transition-colors"
+                      />
+                    ) : (
+                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                        currentPair.validated
+                          ? "bg-white border-l-4 border-green-400 border border-gray-100"
+                          : "bg-white border border-gray-200"
+                      }`}>
+                        {currentPair.answer}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Action row */}
+                <div className="flex items-center gap-2 pt-1 pl-9 flex-wrap">
+                  {editing ? (
+                    <>
+                      <button
+                        onClick={handleSave}
+                        disabled={saving}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 transition-colors"
+                      >
+                        {saving ? "Saving…" : "Save"}
+                      </button>
+                      <button
+                        onClick={() => { setQuestion(currentPair.question); setAnswer(currentPair.answer); setEditing(false); }}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <span className="text-xs text-gray-300 ml-1">← → to save &amp; navigate</span>
+                    </>
+                  ) : (
+                    <>
+                      {currentPair.validated ? (
+                        <button
+                          onClick={handleValidateToggle}
+                          className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 hover:bg-green-200 font-medium transition-colors"
+                        >
+                          ✓ Validated
+                        </button>
+                      ) : (
+                        <button
+                          onClick={handleValidateToggle}
+                          className="text-xs px-3 py-1.5 rounded-lg border border-green-200 bg-green-50 text-green-700 hover:bg-green-100 font-medium transition-colors"
+                        >
+                          Mark validated
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setEditing(true)}
+                        className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-600 transition-colors"
+                      >
+                        Edit
+                      </button>
+                      {confirmDelete ? (
+                        <>
+                          <button
+                            onClick={handleDelete}
+                            disabled={deleting}
+                            className="text-xs px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-50 transition-colors"
+                          >
+                            {deleting ? "Deleting…" : "Confirm delete"}
+                          </button>
+                          <button
+                            onClick={() => setConfirmDelete(false)}
+                            className="text-xs px-2 py-1.5 text-gray-400 hover:text-gray-600 transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDelete(true)}
+                          className="text-xs px-2 py-1.5 text-gray-300 hover:text-red-400 transition-colors ml-auto"
+                          title="Delete this pair"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : pairs.length === 0 && !synthLoading ? (
+              <div className="px-5 py-4 text-xs text-gray-400">
+                No Q&amp;A pairs could be generated for this passage.
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -342,10 +700,6 @@ export default function ChatPage() {
   const [lastPoll, setLastPoll]         = useState<Date | null>(null);
   const [panelOpen, setPanelOpen]       = useState(true);
   const [startingTraining, setStartingTraining] = useState(false);
-  // ── QA Deck state ──
-  const [deckOpen, setDeckOpen]               = useState(false);
-  const [deckPassageIdx, setDeckPassageIdx]   = useState(0);
-  const [deckCardIdx, setDeckCardIdx]         = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
 
@@ -658,13 +1012,6 @@ export default function ChatPage() {
                   segmentCount: event.segment_count ?? 1,
                   qaPairs: [],
                 };
-                // Auto-open deck at the new passage (last user msg with qaPairs)
-                const passageCount = copy.filter(
-                  (m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading)
-                ).length;
-                setDeckPassageIdx(Math.max(0, passageCount - 1));
-                setDeckCardIdx(0);
-                setDeckOpen(true);
                 return copy;
               });
             }
@@ -893,13 +1240,6 @@ export default function ChatPage() {
                 return <div key={i} className="text-center text-sm text-gray-500 italic py-1">{msg.content}</div>;
               }
               if (msg.role === "user") {
-                const pairsReady = (msg.qaPairs?.length ?? 0);
-                const totalExpected = msg.segmentCount ?? 1;
-                // How many skeleton placeholders to show (remaining = expected - arrived)
-                const skeletonCount = msg.synthLoading
-                  ? Math.max(0, totalExpected - pairsReady)
-                  : 0;
-
                 return (
                   <div key={i} className="space-y-2">
                     {/* User bubble */}
@@ -909,66 +1249,29 @@ export default function ChatPage() {
                       </div>
                     </div>
 
-                    {/* QA summary pill — click to open deck */}
-                    {(msg.qaPairs !== undefined || msg.synthLoading) && (() => {
-                      const passageMessages = messages.filter(
-                        (m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading)
-                      );
-                      const thisPIdx = passageMessages.findIndex((m) => m === msg);
-                      const validatedCount = msg.qaPairs?.filter(qa => qa.validated).length ?? 0;
-                      const totalCount = msg.qaPairs?.length ?? 0;
+                    {/* Inline QA deck */}
+                    {(msg.qaPairs !== undefined || msg.synthLoading) && session && (
+                      <InlineDeck
+                        pairs={msg.qaPairs ?? []}
+                        sessionId={session.id}
+                        turnId={msg.id}
+                        synthLoading={!!msg.synthLoading}
+                        segmentCount={msg.segmentCount ?? 1}
+                        onUpdate={(qaId, updates) => handleQAUpdate(msg.id, qaId, updates)}
+                        onDelete={(qaId) => handleQADelete(msg.id, qaId)}
+                      />
+                    )}
 
-                      return (
-                        <div className="flex items-center gap-2 mt-1 pl-1">
-                          {/* Loading indicator */}
-                          {msg.synthLoading && (
-                            <span className="relative flex h-2 w-2 flex-shrink-0">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                            </span>
-                          )}
-
-                          {/* Summary pill / open deck button */}
-                          {msg.synthLoading && msg.qaPairs === undefined ? (
-                            <span className="text-xs text-blue-500 font-medium">Analysing passage…</span>
-                          ) : msg.synthLoading ? (
-                            <button
-                              onClick={() => {
-                                setDeckPassageIdx(Math.max(0, thisPIdx));
-                                setDeckCardIdx(0);
-                                setDeckOpen(true);
-                              }}
-                              className="text-xs px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-blue-600 hover:bg-blue-100 font-medium transition-colors flex items-center gap-1.5"
-                            >
-                              <span>{pairsReady} of {totalExpected} pairs generating…</span>
-                              <span className="text-blue-400">Review →</span>
-                            </button>
-                          ) : totalCount === 0 ? (
-                            <span className="text-xs text-gray-400">No Q&A pairs generated for this passage.</span>
-                          ) : (
-                            <button
-                              onClick={() => {
-                                setDeckPassageIdx(Math.max(0, thisPIdx));
-                                setDeckCardIdx(0);
-                                setDeckOpen(true);
-                              }}
-                              className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors flex items-center gap-2 ${
-                                validatedCount === totalCount
-                                  ? "bg-green-50 border-green-200 text-green-700 hover:bg-green-100"
-                                  : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
-                              }`}
-                            >
-                              {validatedCount === totalCount ? (
-                                <span>✓ {totalCount} pair{totalCount !== 1 ? "s" : ""} validated</span>
-                              ) : (
-                                <span>{validatedCount}/{totalCount} validated</span>
-                              )}
-                              <span className="text-gray-400">· Review →</span>
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })()}
+                    {/* Pre-start loading indicator */}
+                    {msg.synthLoading && msg.qaPairs === undefined && (
+                      <div className="flex items-center gap-2 mt-1 pl-1">
+                        <span className="relative flex h-2 w-2 flex-shrink-0">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                        </span>
+                        <span className="text-xs text-blue-500 font-medium">Analysing passage…</span>
+                      </div>
+                    )}
                   </div>
                 );
               }
@@ -1047,30 +1350,6 @@ export default function ChatPage() {
           onRestartTraining={fetchTrainStatus}
         />
       )}
-
-      {/* ── QA Deck overlay ── */}
-      {deckOpen && session && (() => {
-        const deckMessages: DeckMessage[] = messages
-          .filter((m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading))
-          .map((m) => ({
-            id: m.id,
-            content: m.content,
-            synthLoading: m.synthLoading,
-            segmentCount: m.segmentCount,
-            qaPairs: m.qaPairs,
-          }));
-        return (
-          <QADeck
-            messages={deckMessages}
-            sessionId={session.id}
-            initialPassageIdx={deckPassageIdx}
-            initialCardIdx={deckCardIdx}
-            onClose={() => setDeckOpen(false)}
-            onUpdate={(turnId, qaId, updates) => handleQAUpdate(turnId, qaId, updates)}
-            onDelete={(turnId, qaId) => handleQADelete(turnId, qaId)}
-          />
-        );
-      })()}
 
       <HelpPanel />
     </div>
