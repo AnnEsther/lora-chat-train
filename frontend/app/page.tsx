@@ -36,6 +36,7 @@ interface Message {
   id?: string;
   streaming?: boolean;
   synthLoading?: boolean;
+  segmentCount?: number;   // total segments the backend will process
   qaPairs?: QAPair[];
 }
 
@@ -758,7 +759,6 @@ export default function ChatPage() {
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      let newPairs: QAPair[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -767,9 +767,42 @@ export default function ChatPage() {
         for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
           try {
             const event = JSON.parse(line.slice(6));
-            if (event.type === "qa_pairs") {
-              newPairs = event.pairs ?? [];
+
+            // First event — initialise qaPairs array and store expected segment count
+            if (event.type === "start") {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = {
+                  ...copy[lastIdx],
+                  segmentCount: event.segment_count ?? 1,
+                  qaPairs: [],
+                };
+                return copy;
+              });
             }
+
+            // heartbeat — keep-alive tick, no UI change needed
+            // if (event.type === "heartbeat") { /* no-op */ }
+
+            // One pair arrived — append it immediately so the card appears now
+            if (event.type === "qa_pair" && event.pair) {
+              const pair: QAPair = {
+                id: event.pair.id,
+                question: event.pair.question,
+                answer: event.pair.answer,
+                validated: event.pair.validated ?? false,
+                edited: event.pair.edited ?? false,
+              };
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                const existing = copy[lastIdx].qaPairs ?? [];
+                copy[lastIdx] = { ...copy[lastIdx], qaPairs: [...existing, pair] };
+                return copy;
+              });
+            }
+
             if (event.type === "qa_count") {
               setQaCount({
                 total_count: event.total,
@@ -778,12 +811,13 @@ export default function ChatPage() {
                 ready_to_train: event.ready,
               });
             }
+
+            // Stream complete — remove the loading skeleton
             if (event.type === "end") {
-              // Update the last user message with the synthesised QA pairs and remove loading indicator
               setMessages((prev) => {
                 const copy = [...prev];
                 const lastIdx = copy.length - 1;
-                copy[lastIdx] = { ...copy[lastIdx], synthLoading: false, qaPairs: newPairs.length > 0 ? newPairs : undefined };
+                copy[lastIdx] = { ...copy[lastIdx], synthLoading: false };
                 return copy;
               });
             }
@@ -961,31 +995,47 @@ export default function ChatPage() {
                 return <div key={i} className="text-center text-sm text-gray-500 italic py-1">{msg.content}</div>;
               }
               if (msg.role === "user") {
+                const pairsReady = (msg.qaPairs?.length ?? 0);
+                const totalExpected = msg.segmentCount ?? 1;
+                // How many skeleton placeholders to show (remaining = expected - arrived)
+                const skeletonCount = msg.synthLoading
+                  ? Math.max(0, totalExpected - pairsReady)
+                  : 0;
+
                 return (
-                  <div key={i} className="space-y-1">
+                  <div key={i} className="space-y-2">
                     {/* User bubble */}
                     <div className="flex justify-end">
                       <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-br-sm text-sm leading-relaxed whitespace-pre-wrap bg-blue-600 text-white">
                         {msg.content}
                       </div>
                     </div>
-                    {/* Synthesis loading indicator */}
-                    {msg.synthLoading && (
-                      <div className="flex justify-end">
-                        <div className="flex items-center gap-2 text-xs text-gray-400 px-2">
-                          <svg className="animate-spin h-3.5 w-3.5 text-blue-400" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-                          </svg>
-                          Generating Q&A pairs…
+
+                    {/* QA area — cards + skeletons side by side */}
+                    {(msg.qaPairs !== undefined || msg.synthLoading) && (
+                      <div className="max-w-[80%] ml-auto space-y-2">
+
+                        {/* Status label */}
+                        <div className="flex items-center justify-end gap-2 px-1">
+                          {msg.synthLoading && (
+                            <span className="flex items-center gap-1.5 text-xs text-blue-500 font-medium">
+                              <span className="relative flex h-2 w-2">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                              </span>
+                              Generating Q&A pairs…
+                            </span>
+                          )}
+                          {pairsReady > 0 && (
+                            <span className="text-xs text-gray-400">
+                              {pairsReady} pair{pairsReady !== 1 ? "s" : ""}
+                              {msg.synthLoading ? ` of ${totalExpected}` : " generated"}
+                            </span>
+                          )}
                         </div>
-                      </div>
-                    )}
-                    {/* Inline QA cards */}
-                    {msg.qaPairs && msg.qaPairs.length > 0 && session && (
-                      <div className="max-w-[80%] ml-auto space-y-1">
-                        <p className="text-xs text-gray-400 text-right px-1">{msg.qaPairs.length} Q&A pair{msg.qaPairs.length !== 1 ? "s" : ""} generated</p>
-                        {msg.qaPairs.map((qa) => (
+
+                        {/* Arrived cards */}
+                        {session && msg.qaPairs && msg.qaPairs.map((qa) => (
                           <QACard
                             key={qa.id}
                             pair={qa}
@@ -994,12 +1044,52 @@ export default function ChatPage() {
                             onDelete={(id) => handleQADelete(msg.id, id)}
                           />
                         ))}
+
+                        {/* Skeleton placeholders for pairs still being generated */}
+                        {Array.from({ length: skeletonCount }).map((_, si) => (
+                          <div key={`skel-${si}`} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+                            <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
+                              <div className="h-4 w-16 rounded-full bg-gray-200 animate-pulse" />
+                            </div>
+                            <div className="p-3 space-y-3">
+                              <div>
+                                <div className="h-3 w-16 rounded bg-gray-200 animate-pulse mb-2" />
+                                <div className="space-y-1.5">
+                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
+                                  <div className="h-3 w-4/5 rounded bg-gray-200 animate-pulse" />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="h-3 w-12 rounded bg-gray-200 animate-pulse mb-2" />
+                                <div className="space-y-1.5">
+                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
+                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
+                                  <div className="h-3 w-3/5 rounded bg-gray-200 animate-pulse" />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+
+                        {/* No pairs generated (synthesis done, nothing came back) */}
+                        {!msg.synthLoading && msg.qaPairs && msg.qaPairs.length === 0 && (
+                          <p className="text-xs text-gray-400 text-right px-1">
+                            No Q&A pairs could be generated for this passage.
+                          </p>
+                        )}
                       </div>
                     )}
-                    {/* No pairs generated */}
-                    {!msg.synthLoading && msg.qaPairs && msg.qaPairs.length === 0 && (
+
+                    {/* Initial loading state — before we even know segment count */}
+                    {msg.synthLoading && msg.qaPairs === undefined && (
                       <div className="flex justify-end">
-                        <p className="text-xs text-gray-400 px-2">No Q&A pairs could be generated for this passage.</p>
+                        <span className="flex items-center gap-1.5 text-xs text-blue-500 font-medium px-1">
+                          <span className="relative flex h-2 w-2">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+                          </span>
+                          Analysing passage…
+                        </span>
                       </div>
                     )}
                   </div>
