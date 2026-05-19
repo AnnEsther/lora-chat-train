@@ -416,6 +416,10 @@ async def _force_sleep(session: ChatSession, db: AsyncSession, reason: str):
                 qa.validated = True
         await db.commit()
 
+        # Promote validated QA pairs into TrainingCandidate rows so build_dataset
+        # finds them regardless of whether Phase 1 (extraction) was run.
+        await _promote_qa_to_candidates(session.id, db)
+
         from worker.tasks import enqueue_phase2_pipeline
 
         await _transition(session, SessionState.TRAINING, db)
@@ -453,6 +457,79 @@ async def _get_active_session(session_id: uuid.UUID, db: AsyncSession) -> ChatSe
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     return session
+
+
+async def _promote_qa_to_candidates(session_id: uuid.UUID, db: AsyncSession) -> int:
+    """Convert validated SynthesizedQA rows into TrainingCandidate rows.
+
+    build_dataset in the Celery worker reads from training_candidates (included=True).
+    The inline chat flow stores data in synthesized_qa instead.  This helper bridges
+    the gap by creating one TrainingCandidate per validated QA pair before Phase 2
+    is enqueued, so the rest of the pipeline requires no changes.
+
+    Each pair becomes a 2-turn conversation segment:
+        [{"role": "user", "content": question},
+         {"role": "assistant", "content": answer}]
+
+    The idempotency key is stored in rejection_reason as "qa:<uuid>" so repeated
+    calls (e.g. on retry) never create duplicate rows.  No schema changes required.
+    """
+    from sqlalchemy import select
+    from models import SynthesizedQA, TrainingCandidate
+
+    # All validated QA for this session
+    qa_result = await db.execute(
+        select(SynthesizedQA).where(
+            SynthesizedQA.session_id == session_id,
+            SynthesizedQA.validated == True,  # noqa: E712
+        )
+    )
+    qa_rows = qa_result.scalars().all()
+
+    if not qa_rows:
+        logger.info("promote_qa_no_rows", extra={"session_id": str(session_id)})
+        return 0
+
+    # Collect idempotency markers already in training_candidates for this session
+    existing_result = await db.execute(
+        select(TrainingCandidate.rejection_reason).where(
+            TrainingCandidate.session_id == session_id,
+            TrainingCandidate.rejection_reason.like("qa:%"),
+        )
+    )
+    already_promoted: set[str] = set(existing_result.scalars().all())
+
+    count = 0
+    for qa in qa_rows:
+        marker = f"qa:{qa.id}"
+        if marker in already_promoted:
+            continue
+        candidate = TrainingCandidate(
+            id=uuid.uuid4(),
+            session_id=session_id,
+            conversation=[
+                {"role": "user", "content": qa.question},
+                {"role": "assistant", "content": qa.answer},
+            ],
+            quality_score=1.0,  # user-validated — treat as maximum quality
+            included=True,
+            rejection_reason=marker,  # idempotency key, not an actual rejection
+        )
+        db.add(candidate)
+        count += 1
+
+    if count:
+        await db.commit()
+
+    logger.info(
+        "promote_qa_to_candidates",
+        extra={
+            "session_id": str(session_id),
+            "promoted": count,
+            "skipped": len(qa_rows) - count,
+        },
+    )
+    return count
 
 
 async def _transition(
@@ -757,6 +834,10 @@ async def start_training(
     for qa in unvalidated_result.scalars().all():
         qa.validated = True
     await db.commit()
+
+    # Promote validated QA pairs into TrainingCandidate rows so build_dataset
+    # finds them regardless of whether Phase 1 (extraction) was run.
+    await _promote_qa_to_candidates(session_id, db)
 
     # Transition to TRAINING and trigger Phase 2
     await _transition(session, SessionState.TRAINING, db)
