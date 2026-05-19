@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { HelpPanel } from "@/app/components/HelpPanel";
+import QADeck, { type DeckMessage } from "@/app/components/QADeck";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const MODEL_SERVER_URL = process.env.NEXT_PUBLIC_MODEL_SERVER_URL ?? "http://localhost:8001";
@@ -321,131 +322,6 @@ function DiagnosticPanel({
   );
 }
 
-// ── Inline QA card ────────────────────────────────────────────────────────────
-
-function QACard({
-  pair,
-  sessionId,
-  onUpdate,
-  onDelete,
-}: {
-  pair: QAPair;
-  sessionId: string;
-  onUpdate: (id: string, updates: Partial<QAPair>) => void;
-  onDelete: (id: string) => void;
-}) {
-  const [question, setQuestion] = useState(pair.question);
-  const [answer, setAnswer] = useState(pair.answer);
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const isDirty = question !== pair.question || answer !== pair.answer;
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, answer }),
-      });
-      if (resp.ok) onUpdate(pair.id, { question, answer, edited: true });
-    } catch {}
-    setSaving(false);
-  };
-
-  const handleValidateToggle = async () => {
-    try {
-      const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ validated: !pair.validated }),
-      });
-      if (resp.ok) onUpdate(pair.id, { validated: !pair.validated });
-    } catch {}
-  };
-
-  const handleDelete = async () => {
-    setDeleting(true);
-    try {
-      await fetch(`${API_URL}/sessions/${sessionId}/qa/${pair.id}`, { method: "DELETE" });
-      onDelete(pair.id);
-    } catch {}
-    setDeleting(false);
-    setConfirmDelete(false);
-  };
-
-  return (
-    <div className={`mt-2 rounded-xl border text-sm ${pair.validated ? "border-green-200 bg-green-50" : "border-gray-200 bg-white"}`}>
-      {/* Card header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
-        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${pair.validated ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"}`}>
-          {pair.validated ? "✓ Validated" : "Pending"}
-        </span>
-        {isDirty && <span className="text-xs text-amber-600 font-medium">Unsaved changes</span>}
-      </div>
-
-      <div className="p-3 space-y-3">
-        {/* Question */}
-        <div>
-          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Question</label>
-          <textarea
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            rows={2}
-            className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
-          />
-        </div>
-
-        {/* Answer */}
-        <div>
-          <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Answer</label>
-          <textarea
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            rows={3}
-            className="w-full text-sm px-3 py-2 rounded-lg border border-gray-300 focus:border-blue-400 focus:ring-1 focus:ring-blue-200 resize-none outline-none transition-colors"
-          />
-        </div>
-
-        {/* Action row */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {isDirty && (
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 transition-colors"
-            >
-              {saving ? "Saving…" : "Save changes"}
-            </button>
-          )}
-          <button
-            onClick={handleValidateToggle}
-            className={`text-xs px-3 py-1.5 rounded-lg font-medium border transition-colors ${pair.validated ? "bg-gray-50 hover:bg-gray-100 text-gray-500 border-gray-200" : "bg-green-50 hover:bg-green-100 text-green-700 border-green-200"}`}
-          >
-            {pair.validated ? "Unmark" : "Mark validated"}
-          </button>
-          <div className="flex-1" />
-          {confirmDelete ? (
-            <>
-              <button onClick={handleDelete} disabled={deleting} className="text-xs px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-50 transition-colors">
-                {deleting ? "Deleting…" : "Yes, delete"}
-              </button>
-              <button onClick={() => setConfirmDelete(false)} className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 text-gray-500 transition-colors">
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button onClick={() => setConfirmDelete(true)} className="text-xs px-2 py-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors">
-              Delete
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -466,6 +342,10 @@ export default function ChatPage() {
   const [lastPoll, setLastPoll]         = useState<Date | null>(null);
   const [panelOpen, setPanelOpen]       = useState(true);
   const [startingTraining, setStartingTraining] = useState(false);
+  // ── QA Deck state ──
+  const [deckOpen, setDeckOpen]               = useState(false);
+  const [deckPassageIdx, setDeckPassageIdx]   = useState(0);
+  const [deckCardIdx, setDeckCardIdx]         = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
 
@@ -778,6 +658,13 @@ export default function ChatPage() {
                   segmentCount: event.segment_count ?? 1,
                   qaPairs: [],
                 };
+                // Auto-open deck at the new passage (last user msg with qaPairs)
+                const passageCount = copy.filter(
+                  (m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading)
+                ).length;
+                setDeckPassageIdx(Math.max(0, passageCount - 1));
+                setDeckCardIdx(0);
+                setDeckOpen(true);
                 return copy;
               });
             }
@@ -1022,87 +909,66 @@ export default function ChatPage() {
                       </div>
                     </div>
 
-                    {/* QA area — cards + skeletons side by side */}
-                    {(msg.qaPairs !== undefined || msg.synthLoading) && (
-                      <div className="max-w-[80%] ml-auto space-y-2">
+                    {/* QA summary pill — click to open deck */}
+                    {(msg.qaPairs !== undefined || msg.synthLoading) && (() => {
+                      const passageMessages = messages.filter(
+                        (m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading)
+                      );
+                      const thisPIdx = passageMessages.findIndex((m) => m === msg);
+                      const validatedCount = msg.qaPairs?.filter(qa => qa.validated).length ?? 0;
+                      const totalCount = msg.qaPairs?.length ?? 0;
 
-                        {/* Status label */}
-                        <div className="flex items-center justify-end gap-2 px-1">
+                      return (
+                        <div className="flex items-center gap-2 mt-1 pl-1">
+                          {/* Loading indicator */}
                           {msg.synthLoading && (
-                            <span className="flex items-center gap-1.5 text-xs text-blue-500 font-medium">
-                              <span className="relative flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                              </span>
-                              Generating Q&A pairs…
+                            <span className="relative flex h-2 w-2 flex-shrink-0">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
                             </span>
                           )}
-                          {pairsReady > 0 && (
-                            <span className="text-xs text-gray-400">
-                              {pairsReady} pair{pairsReady !== 1 ? "s" : ""}
-                              {msg.synthLoading ? ` of ${totalExpected}` : " generated"}
-                            </span>
+
+                          {/* Summary pill / open deck button */}
+                          {msg.synthLoading && msg.qaPairs === undefined ? (
+                            <span className="text-xs text-blue-500 font-medium">Analysing passage…</span>
+                          ) : msg.synthLoading ? (
+                            <button
+                              onClick={() => {
+                                setDeckPassageIdx(Math.max(0, thisPIdx));
+                                setDeckCardIdx(0);
+                                setDeckOpen(true);
+                              }}
+                              className="text-xs px-3 py-1.5 rounded-full bg-blue-50 border border-blue-200 text-blue-600 hover:bg-blue-100 font-medium transition-colors flex items-center gap-1.5"
+                            >
+                              <span>{pairsReady} of {totalExpected} pairs generating…</span>
+                              <span className="text-blue-400">Review →</span>
+                            </button>
+                          ) : totalCount === 0 ? (
+                            <span className="text-xs text-gray-400">No Q&A pairs generated for this passage.</span>
+                          ) : (
+                            <button
+                              onClick={() => {
+                                setDeckPassageIdx(Math.max(0, thisPIdx));
+                                setDeckCardIdx(0);
+                                setDeckOpen(true);
+                              }}
+                              className={`text-xs px-3 py-1.5 rounded-full border font-medium transition-colors flex items-center gap-2 ${
+                                validatedCount === totalCount
+                                  ? "bg-green-50 border-green-200 text-green-700 hover:bg-green-100"
+                                  : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                              }`}
+                            >
+                              {validatedCount === totalCount ? (
+                                <span>✓ {totalCount} pair{totalCount !== 1 ? "s" : ""} validated</span>
+                              ) : (
+                                <span>{validatedCount}/{totalCount} validated</span>
+                              )}
+                              <span className="text-gray-400">· Review →</span>
+                            </button>
                           )}
                         </div>
-
-                        {/* Arrived cards */}
-                        {session && msg.qaPairs && msg.qaPairs.map((qa) => (
-                          <QACard
-                            key={qa.id}
-                            pair={qa}
-                            sessionId={session.id}
-                            onUpdate={(id, updates) => handleQAUpdate(msg.id, id, updates)}
-                            onDelete={(id) => handleQADelete(msg.id, id)}
-                          />
-                        ))}
-
-                        {/* Skeleton placeholders for pairs still being generated */}
-                        {Array.from({ length: skeletonCount }).map((_, si) => (
-                          <div key={`skel-${si}`} className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-                            <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
-                              <div className="h-4 w-16 rounded-full bg-gray-200 animate-pulse" />
-                            </div>
-                            <div className="p-3 space-y-3">
-                              <div>
-                                <div className="h-3 w-16 rounded bg-gray-200 animate-pulse mb-2" />
-                                <div className="space-y-1.5">
-                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
-                                  <div className="h-3 w-4/5 rounded bg-gray-200 animate-pulse" />
-                                </div>
-                              </div>
-                              <div>
-                                <div className="h-3 w-12 rounded bg-gray-200 animate-pulse mb-2" />
-                                <div className="space-y-1.5">
-                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
-                                  <div className="h-3 w-full rounded bg-gray-200 animate-pulse" />
-                                  <div className="h-3 w-3/5 rounded bg-gray-200 animate-pulse" />
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-
-                        {/* No pairs generated (synthesis done, nothing came back) */}
-                        {!msg.synthLoading && msg.qaPairs && msg.qaPairs.length === 0 && (
-                          <p className="text-xs text-gray-400 text-right px-1">
-                            No Q&A pairs could be generated for this passage.
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Initial loading state — before we even know segment count */}
-                    {msg.synthLoading && msg.qaPairs === undefined && (
-                      <div className="flex justify-end">
-                        <span className="flex items-center gap-1.5 text-xs text-blue-500 font-medium px-1">
-                          <span className="relative flex h-2 w-2">
-                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                            <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                          </span>
-                          Analysing passage…
-                        </span>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 );
               }
@@ -1181,6 +1047,30 @@ export default function ChatPage() {
           onRestartTraining={fetchTrainStatus}
         />
       )}
+
+      {/* ── QA Deck overlay ── */}
+      {deckOpen && session && (() => {
+        const deckMessages: DeckMessage[] = messages
+          .filter((m) => m.role === "user" && (m.qaPairs !== undefined || m.synthLoading))
+          .map((m) => ({
+            id: m.id,
+            content: m.content,
+            synthLoading: m.synthLoading,
+            segmentCount: m.segmentCount,
+            qaPairs: m.qaPairs,
+          }));
+        return (
+          <QADeck
+            messages={deckMessages}
+            sessionId={session.id}
+            initialPassageIdx={deckPassageIdx}
+            initialCardIdx={deckCardIdx}
+            onClose={() => setDeckOpen(false)}
+            onUpdate={(turnId, qaId, updates) => handleQAUpdate(turnId, qaId, updates)}
+            onDelete={(turnId, qaId) => handleQADelete(turnId, qaId)}
+          />
+        );
+      })()}
 
       <HelpPanel />
     </div>
