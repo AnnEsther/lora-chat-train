@@ -44,6 +44,11 @@ from shared.slack_notifier import (
     session_sleeping,
     insufficient_data_warning,
 )
+from training.knowledge.synthesizer import (
+    _split_passage,
+    _synthesize_one,
+    _fallback_from_segment,
+)
 
 MIN_TRAINING_SAMPLES: int = int(os.environ.get("MIN_TRAINING_SAMPLES", 10))
 
@@ -273,97 +278,96 @@ async def _synthesize_and_stream(
     """
     import asyncio
     from models import SynthesizedQA
-    from training.knowledge.synthesizer import (
-        _split_passage,
-        _synthesize_one,
-        _fallback_from_segment,
-    )
+    from sqlalchemy import func, select as sa_select
 
     loop = asyncio.get_event_loop()
 
-    # Split passage into segments upfront so we can report the total count
-    segments = _split_passage(passage.strip(), max_parts=5)
-    yield f"data: {json.dumps({'type': 'start', 'segment_count': len(segments)})}\n\n"
+    try:
+        # Split passage into segments upfront so we can tell the frontend how many to expect
+        segments = _split_passage(passage.strip(), max_parts=5)
+        yield f"data: {json.dumps({'type': 'start', 'segment_count': len(segments)})}\n\n"
 
-    total_persisted = 0
+        for i, segment in enumerate(segments):
+            # Run synthesis for this segment in the thread pool (blocking HTTP call to model server)
+            try:
+                pair_dict = await loop.run_in_executor(
+                    None,
+                    lambda seg=segment: _synthesize_one(
+                        seg, session.training_system_prompt
+                    ),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "segment_synthesis_failed",
+                    extra={
+                        "segment": i,
+                        "error": str(exc),
+                        "session_id": str(session.id),
+                    },
+                )
+                pair_dict = _fallback_from_segment(segment)
 
-    for i, segment in enumerate(segments):
-        # ── Heartbeat task — keeps the connection alive while model is thinking ──
-        heartbeat_stop = asyncio.Event()
+            # Heartbeat keeps the SSE connection alive between model calls
+            yield 'data: {"type":"heartbeat"}\n\n'
 
-        async def _send_heartbeats(stop_event: asyncio.Event):
-            while not stop_event.is_set():
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(asyncio.ensure_future(stop_event.wait())),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    pass  # 5s elapsed — heartbeat will be yielded below
+            if not pair_dict:
+                logger.info("segment_no_pair", extra={"segment": i})
+                continue
 
-        # Run synthesis for this one segment in thread pool
-        try:
-            pair_dict = await loop.run_in_executor(
-                None,
-                lambda seg=segment: _synthesize_one(
-                    seg, session.training_system_prompt
-                ),
+            # Persist immediately
+            qa = SynthesizedQA(
+                id=uuid.uuid4(),
+                session_id=session.id,
+                source_turn_id=user_turn.id,
+                question=pair_dict["question"],
+                answer=pair_dict["answer"],
+                validated=False,
+                edited=False,
             )
-        except Exception as exc:
-            logger.warning(
-                "segment_synthesis_failed",
-                extra={"segment": i, "error": str(exc), "session_id": str(session.id)},
+            db.add(qa)
+            await db.commit()
+            await db.refresh(qa)
+
+            # Stream the pair immediately — card appears in the chat window now
+            yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False}})}\n\n"
+
+            logger.info(
+                "pair_streamed",
+                extra={
+                    "segment": i,
+                    "session_id": str(session.id),
+                    "qa_id": str(qa.id),
+                },
             )
-            # Try no-model fallback synchronously (instant)
-            pair_dict = _fallback_from_segment(segment)
 
-        # Emit a heartbeat so the connection stays warm between pairs
-        yield 'data: {"type":"heartbeat"}\n\n'
-
-        if not pair_dict:
-            logger.info("segment_no_pair", extra={"segment": i})
-            continue
-
-        # Persist immediately
-        qa = SynthesizedQA(
-            id=uuid.uuid4(),
-            session_id=session.id,
-            source_turn_id=user_turn.id,
-            question=pair_dict["question"],
-            answer=pair_dict["answer"],
-            validated=False,
-            edited=False,
+        # Final count update
+        total_result = await db.execute(
+            sa_select(func.count())
+            .select_from(SynthesizedQA)
+            .where(SynthesizedQA.session_id == session.id)
         )
-        db.add(qa)
-        await db.commit()
-        await db.refresh(qa)
-        total_persisted += 1
-
-        # Stream the pair to the frontend immediately
-        yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False}})}\n\n"
-
-        logger.info(
-            "pair_streamed",
-            extra={"segment": i, "session_id": str(session.id), "qa_id": str(qa.id)},
+        validated_result = await db.execute(
+            sa_select(func.count())
+            .select_from(SynthesizedQA)
+            .where(
+                SynthesizedQA.session_id == session.id, SynthesizedQA.validated == True
+            )
         )
+        total_count = total_result.scalar() or 0
+        validated_count = validated_result.scalar() or 0
 
-    # Emit updated count so the frontend knows whether Start Training is enabled
-    from sqlalchemy import func, select as sa_select
-    from models import SynthesizedQA as _SQA
+        yield f"data: {json.dumps({'type': 'qa_count', 'total': total_count, 'validated': validated_count, 'min_required': MIN_TRAINING_SAMPLES, 'ready': validated_count >= MIN_TRAINING_SAMPLES})}\n\n"
 
-    total_result = await db.execute(
-        sa_select(func.count()).select_from(_SQA).where(_SQA.session_id == session.id)
-    )
-    validated_result = await db.execute(
-        sa_select(func.count())
-        .select_from(_SQA)
-        .where(_SQA.session_id == session.id, _SQA.validated == True)
-    )
-    total_count = total_result.scalar() or 0
-    validated_count = validated_result.scalar() or 0
+    except Exception as exc:
+        logger.error(
+            "synthesis_stream_error",
+            extra={"error": str(exc), "session_id": str(session.id)},
+            exc_info=True,
+        )
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
-    yield f"data: {json.dumps({'type': 'qa_count', 'total': total_count, 'validated': validated_count, 'min_required': MIN_TRAINING_SAMPLES, 'ready': validated_count >= MIN_TRAINING_SAMPLES})}\n\n"
-    yield 'data: {"type":"end"}\n\n'
+    finally:
+        yield 'data: {"type":"end"}\n\n'
 
 
 async def _handle_sleep_command(session: ChatSession, db: AsyncSession):

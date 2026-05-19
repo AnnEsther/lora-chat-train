@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.worker-slim.txt
 COPY backend/. .
 COPY worker/ ./worker/
 COPY shared/ ./shared/
+COPY training/ ./training/
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

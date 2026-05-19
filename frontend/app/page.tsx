@@ -812,6 +812,17 @@ export default function ChatPage() {
               });
             }
 
+            // Backend error event — show message, stop loading
+            if (event.type === "error") {
+              setError(`Synthesis failed: ${event.message ?? "unknown error"}`);
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], synthLoading: false };
+                return copy;
+              });
+            }
+
             // Stream complete — remove the loading skeleton
             if (event.type === "end") {
               setMessages((prev) => {
