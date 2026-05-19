@@ -326,7 +326,6 @@ function DiagnosticPanel({
 function InlineDeck({
   pairs,
   sessionId,
-  turnId,
   synthLoading,
   segmentCount,
   onUpdate,
@@ -340,55 +339,45 @@ function InlineDeck({
   onUpdate: (qaId: string, updates: Partial<QAPair>) => void;
   onDelete: (qaId: string) => void;
 }) {
-  const [cardIdx, setCardIdx]     = useState(0);
-  const [slideDir, setSlideDir]   = useState<"left" | "right" | null>(null);
-  const [animating, setAnimating] = useState(false);
-  const [editing, setEditing]     = useState(false);
-  const [question, setQuestion]   = useState("");
-  const [answer, setAnswer]       = useState("");
-  const [saving, setSaving]       = useState(false);
-  const [deleting, setDeleting]   = useState(false);
+  const [cardIdx, setCardIdx]           = useState(0);
+  const [slideDir, setSlideDir]         = useState<"left" | "right" | null>(null);
+  const [animating, setAnimating]       = useState(false);
+  const [editing, setEditing]           = useState(false);
+  const [question, setQuestion]         = useState("");
+  const [answer, setAnswer]             = useState("");
+  const [saving, setSaving]             = useState(false);
+  const [deleting, setDeleting]         = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [validatingAll, setValidatingAll] = useState(false);
 
-  const totalCards = synthLoading ? Math.max(pairs.length, segmentCount) : pairs.length;
+  const totalCards  = synthLoading ? Math.max(pairs.length, segmentCount) : pairs.length;
   const currentPair = pairs[cardIdx] ?? null;
+  const allValidated = pairs.length > 0 && pairs.every(p => p.validated);
 
   // Clamp index when pairs arrive or get deleted
   useEffect(() => {
-    if (cardIdx >= pairs.length && pairs.length > 0) {
-      setCardIdx(pairs.length - 1);
-    }
+    if (cardIdx >= pairs.length && pairs.length > 0) setCardIdx(pairs.length - 1);
   }, [pairs.length, cardIdx]);
 
   // Sync edit buffers when the displayed card changes
   useEffect(() => {
-    if (currentPair) {
-      setQuestion(currentPair.question);
-      setAnswer(currentPair.answer);
-    }
+    if (currentPair) { setQuestion(currentPair.question); setAnswer(currentPair.answer); }
     setEditing(false);
     setConfirmDelete(false);
     setSaving(false);
     setDeleting(false);
   }, [cardIdx, currentPair?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Also sync buffers if pair content changes from outside (session reload)
+  // Sync buffers if pair content changes externally (session reload)
   useEffect(() => {
-    if (currentPair && !editing) {
-      setQuestion(currentPair.question);
-      setAnswer(currentPair.answer);
-    }
+    if (currentPair && !editing) { setQuestion(currentPair.question); setAnswer(currentPair.answer); }
   }, [currentPair?.question, currentPair?.answer]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const goTo = useCallback((target: number, dir: "left" | "right") => {
     if (animating || target === cardIdx) return;
     setSlideDir(dir);
     setAnimating(true);
-    setTimeout(() => {
-      setCardIdx(target);
-      setSlideDir(null);
-      setAnimating(false);
-    }, 260);
+    setTimeout(() => { setCardIdx(target); setSlideDir(null); setAnimating(false); }, 260);
   }, [animating, cardIdx]);
 
   const goNext = useCallback(() => {
@@ -408,25 +397,46 @@ function InlineDeck({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, answer }),
       });
-      if (resp.ok) {
-        onUpdate(currentPair.id, { question, answer, edited: true });
-        setEditing(false);
-      }
+      if (resp.ok) { onUpdate(currentPair.id, { question, answer, edited: true }); setEditing(false); }
     } catch {}
     setSaving(false);
   }, [currentPair, sessionId, question, answer, onUpdate]);
 
   const handleValidateToggle = useCallback(async () => {
     if (!currentPair) return;
+    const newVal = !currentPair.validated;
     try {
       const resp = await fetch(`${API_URL}/sessions/${sessionId}/qa/${currentPair.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ validated: !currentPair.validated }),
+        body: JSON.stringify({ validated: newVal }),
       });
-      if (resp.ok) onUpdate(currentPair.id, { validated: !currentPair.validated });
+      if (resp.ok) {
+        onUpdate(currentPair.id, { validated: newVal });
+        // Auto-advance on validate (not on un-validate)
+        if (newVal) goNext();
+      }
     } catch {}
-  }, [currentPair, sessionId, onUpdate]);
+  }, [currentPair, sessionId, onUpdate, goNext]);
+
+  const handleValidateAll = useCallback(async () => {
+    const unvalidated = pairs.filter(p => !p.validated);
+    if (unvalidated.length === 0) return;
+    setValidatingAll(true);
+    try {
+      await Promise.all(
+        unvalidated.map(p =>
+          fetch(`${API_URL}/sessions/${sessionId}/qa/${p.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ validated: true }),
+          }).then(resp => { if (resp.ok) onUpdate(p.id, { validated: true }); })
+        )
+      );
+    } catch {}
+    setValidatingAll(false);
+    goTo(0, "right");
+  }, [pairs, sessionId, onUpdate, goTo]);
 
   const handleDelete = useCallback(async () => {
     if (!currentPair) return;
@@ -439,27 +449,32 @@ function InlineDeck({
     setConfirmDelete(false);
   }, [currentPair, sessionId, onDelete]);
 
-  // Keyboard nav — only fires when this deck's wrapper div is focused
+  // Keyboard nav — only fires when this deck wrapper is focused
   const handleKeyDown = useCallback(async (e: React.KeyboardEvent) => {
     if (e.key === "ArrowRight") {
       e.preventDefault();
-      if (editing) { await handleSave(); }
+      if (editing) await handleSave();
       goNext();
     } else if (e.key === "ArrowLeft") {
       e.preventDefault();
-      if (editing) { await handleSave(); }
+      if (editing) await handleSave();
       goPrev();
     }
   }, [editing, handleSave, goNext, goPrev]);
 
   const isSkeletonSlot = !currentPair && synthLoading;
+  const exitTranslate  = slideDir === "left"  ? "-translate-x-full" : slideDir === "right" ? "translate-x-full"  : "translate-x-0";
 
-  // Slide transform classes
-  const exitTranslate  = slideDir === "left"  ? "-translate-x-full" : slideDir === "right" ? "translate-x-full" : "translate-x-0";
-  const enterTranslate = slideDir === "left"  ? "translate-x-full"  : slideDir === "right" ? "-translate-x-full" : "translate-x-0";
+  // Dot colour per card validation state
+  const dotClass = (di: number) => {
+    if (di >= pairs.length) return "bg-gray-200 animate-pulse cursor-default";
+    const validated = pairs[di].validated;
+    const isCurrent = di === cardIdx;
+    if (isCurrent)   return validated ? "bg-green-500 ring-2 ring-green-200" : "bg-red-400 ring-2 ring-red-200";
+    return validated ? "bg-green-300 hover:bg-green-400 cursor-pointer" : "bg-red-200 hover:bg-red-300 cursor-pointer";
+  };
 
   return (
-    // tabIndex makes the div focusable so onKeyDown fires
     <div
       className="mt-2 outline-none focus-within:ring-2 focus-within:ring-blue-200 rounded-2xl"
       tabIndex={-1}
@@ -468,28 +483,23 @@ function InlineDeck({
       <div className="border border-gray-200 rounded-2xl bg-white shadow-sm overflow-hidden">
 
         {/* ── Nav header ── */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-gray-50">
+        <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-100 bg-gray-50">
+
           {/* Dot indicators */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             {Array.from({ length: totalCards }).map((_, di) => (
               <button
                 key={di}
                 onClick={() => di < pairs.length && goTo(di, di > cardIdx ? "left" : "right")}
                 disabled={di >= pairs.length}
-                className={`w-2 h-2 rounded-full transition-colors ${
-                  di === cardIdx
-                    ? "bg-blue-500"
-                    : di < pairs.length
-                    ? "bg-gray-300 hover:bg-gray-400 cursor-pointer"
-                    : "bg-gray-200 animate-pulse cursor-default"
-                }`}
-                title={di < pairs.length ? `Card ${di + 1}` : "Generating…"}
+                className={`w-2.5 h-2.5 rounded-full transition-all ${dotClass(di)}`}
+                title={di < pairs.length ? (pairs[di].validated ? `Card ${di + 1} — validated` : `Card ${di + 1} — not validated`) : "Generating…"}
               />
             ))}
           </div>
 
-          {/* Counter + loading status */}
-          <div className="flex items-center gap-2">
+          {/* Counter + streaming indicator */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             {synthLoading && (
               <span className="relative flex h-2 w-2">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
@@ -505,19 +515,33 @@ function InlineDeck({
             </span>
           </div>
 
-          {/* Prev / Next buttons */}
-          <div className="flex items-center gap-1">
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Validate all button */}
+          {pairs.length > 1 && !allValidated && (
+            <button
+              onClick={handleValidateAll}
+              disabled={validatingAll}
+              className="text-xs px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium disabled:opacity-60 transition-colors flex-shrink-0"
+            >
+              {validatingAll ? "Validating…" : "Validate all"}
+            </button>
+          )}
+
+          {/* Prev / Next */}
+          <div className="flex items-center gap-1 flex-shrink-0">
             <button
               onClick={goPrev}
               disabled={cardIdx === 0 || animating}
-              className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-3 py-1.5 text-sm rounded-lg bg-white border border-gray-300 hover:bg-gray-100 text-gray-600 font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               ←
             </button>
             <button
               onClick={goNext}
               disabled={cardIdx >= pairs.length - 1 || animating}
-              className="px-2.5 py-1 text-xs rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="px-3 py-1.5 text-sm rounded-lg bg-white border border-gray-300 hover:bg-gray-100 text-gray-600 font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             >
               →
             </button>
@@ -526,11 +550,8 @@ function InlineDeck({
 
         {/* ── Card area ── */}
         <div className="relative overflow-hidden">
-          <div
-            className={`transition-transform duration-[260ms] ease-in-out ${animating ? exitTranslate + " opacity-0" : "translate-x-0 opacity-100"}`}
-          >
+          <div className={`transition-transform duration-[260ms] ease-in-out ${animating ? exitTranslate + " opacity-0" : "translate-x-0 opacity-100"}`}>
             {isSkeletonSlot ? (
-              /* Skeleton */
               <div className="px-5 py-4 space-y-3">
                 <div className="flex items-start gap-3">
                   <div className="w-6 h-6 rounded-full bg-gray-200 animate-pulse flex-shrink-0 mt-0.5" />
@@ -549,8 +570,8 @@ function InlineDeck({
                 </div>
               </div>
             ) : currentPair ? (
-              /* Real card */
               <div className="px-5 py-4 space-y-3">
+
                 {/* Question */}
                 <div className="flex items-start gap-3">
                   <span className="w-6 h-6 rounded-full bg-gray-200 text-gray-500 text-xs font-bold flex items-center justify-center select-none flex-shrink-0 mt-0.5">Q</span>
@@ -563,10 +584,10 @@ function InlineDeck({
                         className="w-full rounded-xl border-2 border-blue-300 focus:border-blue-500 bg-gray-50 px-3 py-2 text-sm leading-relaxed outline-none resize-none transition-colors"
                       />
                     ) : (
-                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap transition-colors ${
                         currentPair.validated
-                          ? "bg-gray-50 border-l-4 border-green-400 border border-gray-100"
-                          : "bg-gray-50 border border-gray-200"
+                          ? "bg-green-50 border border-green-200 border-l-4 border-l-green-400"
+                          : "bg-red-50 border border-red-100"
                       }`}>
                         {currentPair.question}
                       </div>
@@ -586,10 +607,10 @@ function InlineDeck({
                         className="w-full rounded-xl border-2 border-blue-300 focus:border-blue-500 bg-white px-3 py-2 text-sm leading-relaxed outline-none resize-none transition-colors"
                       />
                     ) : (
-                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+                      <div className={`rounded-xl px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap transition-colors ${
                         currentPair.validated
-                          ? "bg-white border-l-4 border-green-400 border border-gray-100"
-                          : "bg-white border border-gray-200"
+                          ? "bg-green-50 border border-green-200 border-l-4 border-l-green-400"
+                          : "bg-red-50 border border-red-100"
                       }`}>
                         {currentPair.answer}
                       </div>
@@ -604,53 +625,58 @@ function InlineDeck({
                       <button
                         onClick={handleSave}
                         disabled={saving}
-                        className="text-xs px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 transition-colors"
+                        className="text-sm px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 transition-colors"
                       >
                         {saving ? "Saving…" : "Save"}
                       </button>
                       <button
                         onClick={() => { setQuestion(currentPair.question); setAnswer(currentPair.answer); setEditing(false); }}
-                        className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-500 transition-colors"
+                        className="text-sm px-4 py-2 rounded-lg bg-white border border-gray-300 hover:bg-gray-100 text-gray-600 font-medium transition-colors"
                       >
                         Cancel
                       </button>
-                      <span className="text-xs text-gray-300 ml-1">← → to save &amp; navigate</span>
+                      <span className="text-xs text-gray-400 ml-1">← → saves &amp; navigates</span>
                     </>
                   ) : (
                     <>
+                      {/* Validate toggle */}
                       {currentPair.validated ? (
                         <button
                           onClick={handleValidateToggle}
-                          className="text-xs px-3 py-1.5 rounded-lg bg-green-100 text-green-700 hover:bg-green-200 font-medium transition-colors"
+                          className="text-sm px-4 py-2 rounded-lg bg-green-100 border border-green-300 text-green-800 hover:bg-green-200 font-medium transition-colors"
                         >
                           ✓ Validated
                         </button>
                       ) : (
                         <button
                           onClick={handleValidateToggle}
-                          className="text-xs px-3 py-1.5 rounded-lg border border-green-200 bg-green-50 text-green-700 hover:bg-green-100 font-medium transition-colors"
+                          className="text-sm px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition-colors"
                         >
                           Mark validated
                         </button>
                       )}
+
+                      {/* Edit */}
                       <button
                         onClick={() => setEditing(true)}
-                        className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 text-gray-600 transition-colors"
+                        className="text-sm px-4 py-2 rounded-lg bg-white border border-gray-300 hover:bg-gray-100 text-gray-700 font-medium transition-colors"
                       >
                         Edit
                       </button>
+
+                      {/* Delete */}
                       {confirmDelete ? (
                         <>
                           <button
                             onClick={handleDelete}
                             disabled={deleting}
-                            className="text-xs px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-50 transition-colors"
+                            className="text-sm px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium disabled:opacity-50 transition-colors"
                           >
                             {deleting ? "Deleting…" : "Confirm delete"}
                           </button>
                           <button
                             onClick={() => setConfirmDelete(false)}
-                            className="text-xs px-2 py-1.5 text-gray-400 hover:text-gray-600 transition-colors"
+                            className="text-sm px-3 py-2 rounded-lg bg-white border border-gray-300 hover:bg-gray-100 text-gray-600 font-medium transition-colors"
                           >
                             Cancel
                           </button>
@@ -658,7 +684,7 @@ function InlineDeck({
                       ) : (
                         <button
                           onClick={() => setConfirmDelete(true)}
-                          className="text-xs px-2 py-1.5 text-gray-300 hover:text-red-400 transition-colors ml-auto"
+                          className="text-sm px-3 py-2 rounded-lg bg-white border border-gray-200 hover:border-red-300 hover:bg-red-50 text-gray-400 hover:text-red-500 font-medium transition-colors ml-auto"
                           title="Delete this pair"
                         >
                           ✕
@@ -669,7 +695,7 @@ function InlineDeck({
                 </div>
               </div>
             ) : pairs.length === 0 && !synthLoading ? (
-              <div className="px-5 py-4 text-xs text-gray-400">
+              <div className="px-5 py-4 text-sm text-gray-400">
                 No Q&amp;A pairs could be generated for this passage.
               </div>
             ) : null}
