@@ -305,6 +305,15 @@ async def _synthesize_and_stream(
                         "session_id": str(session.id),
                     },
                 )
+                pair_dict = None
+
+            # If the model returned nothing parseable, use the no-model fallback
+            # (guaranteed to always return a pair from the segment text itself)
+            if pair_dict is None:
+                logger.info(
+                    "using_fallback",
+                    extra={"segment": i, "session_id": str(session.id)},
+                )
                 pair_dict = _fallback_from_segment(segment)
 
             # Heartbeat keeps the SSE connection alive between model calls

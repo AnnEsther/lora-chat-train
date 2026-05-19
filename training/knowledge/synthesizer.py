@@ -18,7 +18,7 @@ BATCH_SIZE = int(os.environ.get("QA_BATCH_SIZE", "5"))  # facts per model call
 MAX_RETRIES = 2
 CALL_TIMEOUT = int(os.environ.get("QA_SYNTHESIS_TIMEOUT", "60"))
 # Per-item token budget for single-passage synthesis (question + answer, batch=1)
-PASSAGE_MAX_TOKENS = int(os.environ.get("QA_PASSAGE_MAX_TOKENS", "400"))
+PASSAGE_MAX_TOKENS = int(os.environ.get("QA_PASSAGE_MAX_TOKENS", "512"))
 
 
 @dataclass
@@ -367,16 +367,20 @@ def _synthesize_one(
 ) -> Optional[dict[str, str]]:
     """
     Ask the model to generate a single Q&A pair from one text segment.
-    Uses a tight single-object prompt optimised for small (1B) models.
+
+    Uses the shortest possible prompt that reliably elicits valid JSON from
+    small (1B) models. Caps the segment at 300 chars so the model spends its
+    token budget on the answer, not re-reading a long passage.
     """
-    context_note = f"\nContext: {system_prompt}" if system_prompt else ""
+    # Keep the input short — small models get confused by long contexts
+    snippet = segment.strip()[:300]
+
+    # Minimal, explicit prompt — no fluff, just the instruction + example format
     prompt = (
-        f"You are creating training data for an AI assistant.{context_note}\n\n"
-        f'Read this text: "{segment}"\n\n'
-        f"Write ONE question someone might ask about this text, "
-        f"and the best answer based on the text.\n\n"
-        f"Output ONLY valid JSON, nothing else:\n"
-        f'{{"question": "...", "answer": "..."}}'
+        f'Text: "{snippet}"\n\n'
+        f"Write a question and answer about the text above.\n"
+        f"Respond with ONLY this JSON (no explanation):\n"
+        f'{{"question": "your question here", "answer": "your answer here"}}'
     )
 
     try:
@@ -387,7 +391,14 @@ def _synthesize_one(
         )
         if not resp.ok:
             raise Exception(f"Model server returned {resp.status_code}")
-        raw = resp.json().get("response", resp.json().get("text", ""))
+        raw_json = resp.json()
+        raw = (
+            raw_json.get("response")
+            or raw_json.get("text")
+            or raw_json.get("generated_text")
+            or ""
+        )
+        logger.info("model_raw_response", extra={"preview": raw[:300]})
         return _parse_single_pair(raw, segment)
     except requests.RequestException as exc:
         raise Exception(f"Model server unreachable: {exc}") from exc
@@ -439,6 +450,19 @@ def _parse_single_pair(
             "question": q_match.group(1).strip(),
             "answer": a_match.group(1).strip(),
         }
+
+    # Level 4: partial / truncated JSON — extract question and answer separately
+    # Handles cases like: {"question": "What is X?", "answer": "X is a truncated ans
+    q_match = re.search(r'"question"\s*:\s*"([^"]{6,})"', clean)
+    a_match = re.search(r'"answer"\s*:\s*"([^"]{6,})', clean)  # no closing quote needed
+    if q_match and a_match:
+        q = q_match.group(1).strip()
+        # Take everything after "answer": " up to next " or end of string
+        a_raw = a_match.group(1)
+        # Trim at next unescaped quote or closing brace
+        a = re.split(r'(?<!\\)"|\}', a_raw)[0].strip()
+        if q and a and len(a) > 5:
+            return {"question": q, "answer": a}
 
     logger.warning("parse_single_pair_failed", extra={"preview": clean[:200]})
     return None
