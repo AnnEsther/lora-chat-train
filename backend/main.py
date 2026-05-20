@@ -1004,11 +1004,13 @@ async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
     Stateless streaming chat for Glyph Chat.
     No session created, no token budget, no training trigger.
     """
-    # Load the requested adapter if it isn't the base
-    if request.adapter_id and request.adapter_id != "base":
-        import requests as req
+    # Load or unload the adapter based on the requested adapter_id
+    import requests as req
 
-        model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+    model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+
+    if request.adapter_id and request.adapter_id != "base":
+        # Load the requested LoRA adapter
         try:
             adapters_resp = req.get(f"{model_url}/adapters", timeout=5)
             if adapters_resp.ok:
@@ -1024,6 +1026,16 @@ async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
                     )
         except Exception as exc:
             logger.warning("direct_chat_adapter_load_failed", extra={"error": str(exc)})
+    else:
+        # User wants the base model — explicitly unload any active LoRA adapter
+        try:
+            req.post(
+                f"{model_url}/reload_adapter",
+                json={"adapter_dir": "base"},
+                timeout=30,
+            )
+        except Exception as exc:
+            logger.warning("direct_chat_base_unload_failed", extra={"error": str(exc)})
 
     messages = request.history + [{"role": "user", "content": request.message}]
     model_client: ModelClient = app.state.model_client
