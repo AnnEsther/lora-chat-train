@@ -70,20 +70,27 @@ The `/sleep` command still works and now goes directly to Phase 2 training (skip
 | `TEMPERATURE` | — | Sampling temperature |
 | `MODEL_REQUEST_TIMEOUT` | — | HTTP timeout for model server requests |
 
-## Frontend (`frontend/app/page.tsx`)
-- `sendMessage()` opens a `fetch` SSE stream to `/sessions/{id}/chat`
-- Parses each `data:` line, dispatches by `type`
-- On `chunk`: appends text to the last streaming message in state
-- On `status`: updates `session.total_tokens` and `session.state`
-- On `validating` / `sleeping`: inserts a system message, marks session state
-- On `end`: clears the `streaming` flag on the last message
-- Enter key submits (Shift+Enter inserts newline)
-- Textarea auto-resizes up to 160 px
+## Frontend SSE Handling (`frontend/app/page.tsx`)
+
+`sendMessage()` opens a `fetch` SSE stream to `POST /sessions/{id}/chat` and dispatches events:
+
+| Event | Frontend action |
+|-------|----------------|
+| `start` | Sets `qaPairs: []` and `segmentCount` on the last message; `InlineDeck` appears with skeleton slots |
+| `qa_pair` | Appends one `QAPair` to last message's `qaPairs`; skeleton slot replaced by real card |
+| `qa_count` | Updates global `qaCount` state; refreshes Start Training button counter |
+| `end` | Clears `synthLoading` on last message; all skeletons disappear |
+| `sleeping` / `sleep_ack` | Inserts system message; updates session state to `TRAINING` |
+| `validating` | Inserts system message; updates session state to `VALIDATING` |
+| `error` | Shows error banner; clears `synthLoading` |
+
+QA pairs appear **inline below the user bubble** as an `InlineDeck` component — not in a modal. See [frontend-ui.md](./frontend-ui.md) for full deck behaviour.
 
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
-| 2026-04-29 | FAILED sessions no longer freeze chat — input stays active, error shown in chat window via system message; INSUFFICIENT_DATA transition now also injects a system message in the chat window | opencode |
+| 2026-05-20 | Update frontend SSE handling table to reflect InlineDeck (not modal); qa_pair events populate InlineDeck cards progressively; no modal-open trigger on SSE events | opencode |
+| 2026-05-18 | Complete redesign of chat flow: every message now synthesises Q&A pairs inline instead of streaming an LLM reply. New SSE events: qa_pairs, qa_count. _force_sleep now routes to Phase 2 directly if inline QA exists. | opencode |
+| 2026-04-29 | FAILED sessions no longer freeze chat — input stays active; INSUFFICIENT_DATA transition injects system message | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
-| 2026-05-18 | Complete redesign of chat flow: every message now synthesises Q&A pairs inline instead of streaming an LLM reply. New SSE events: qa_pairs, qa_count. _force_sleep now routes to Phase 2 directly if inline QA exists. New synthesize_from_passage() function with single-item batch prompting for reliability on small models. | opencode |

@@ -20,7 +20,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-BASE_MODEL = os.environ.get("BASE_MODEL", "meta-llama/Llama-3.2-1B-Instruct")
+BASE_MODEL = os.environ.get(
+    "BASE_MODEL", "cognitivecomputations/dolphin-2.9-mistral-7b-v2"
+)
 HF_TRAINING_ENDPOINT = os.environ.get("HF_TRAINING_ENDPOINT", "")
 
 # LoRA / training hyperparameters — override via env
@@ -100,12 +102,15 @@ class HFTrainingLauncher:
             return f"local_{run_id}"
         else:
             import os
+
             # Submit to HuggingFace training endpoint
             run_id = config.get("run_id", "unknown")
             payload = {
                 "run_id": run_id,
                 "dataset_s3_path": config.get("dataset_s3_path", ""),
-                "base_model": config.get("base_model", os.environ.get("BASE_MODEL", "")),
+                "base_model": config.get(
+                    "base_model", os.environ.get("BASE_MODEL", "")
+                ),
                 "lora_r": config.get("lora_r", 16),
                 "lora_alpha": config.get("lora_alpha", 32),
                 "lora_dropout": config.get("lora_dropout", 0.05),
@@ -123,12 +128,14 @@ class HFTrainingLauncher:
                 resp.raise_for_status()
                 data = resp.json()
                 job_id = data.get("id") or data.get("job_id") or run_id
-                logger.info("hf_job_submitted", extra={"job_id": job_id, "run_id": run_id})
+                logger.info(
+                    "hf_job_submitted", extra={"job_id": job_id, "run_id": run_id}
+                )
                 return job_id
             except requests.RequestException as exc:
                 logger.error("hf_submit_error", extra={"error": str(exc)})
                 # Fall back to treating run_id as job_id for polling
-                return f"local_{run_id}"            
+                return f"local_{run_id}"
 
     def poll(self, hf_job_id: str) -> Literal["running", "succeeded", "failed"]:
         """Returns one of: running | succeeded | failed."""
@@ -211,15 +218,18 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
             parts = s3_uri[5:].split("/", 1)
             bucket, key = parts[0], parts[1]
             tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
-            logger.info("downloading_dataset_from_s3", extra={"uri": s3_uri, "local": tmp.name})
+            logger.info(
+                "downloading_dataset_from_s3", extra={"uri": s3_uri, "local": tmp.name}
+            )
             boto3.client("s3").download_file(bucket, key, tmp.name)
             dataset_path = Path(tmp.name)
         else:
-            raise ValueError(
-                f"No valid dataset: local='{dataset_path}', s3='{s3_uri}'"
-            )
+            raise ValueError(f"No valid dataset: local='{dataset_path}', s3='{s3_uri}'")
 
-    logger.info("train_local_start", extra={"dataset": str(dataset_path), "config": config.get("run_id")})
+    logger.info(
+        "train_local_start",
+        extra={"dataset": str(dataset_path), "config": config.get("run_id")},
+    )
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -227,7 +237,10 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     from datasets import load_dataset
 
     run_id = config.get("run_id", "unknown")
-    base_model = config.get("base_model", os.environ.get("BASE_MODEL", "meta-llama/Llama-3.2-1B-Instruct"))
+    base_model = config.get(
+        "base_model",
+        os.environ.get("BASE_MODEL", "cognitivecomputations/dolphin-2.9-mistral-7b-v2"),
+    )
     lora_cfg = config.get("lora", {})
     train_cfg = config.get("training", {})
 
@@ -249,7 +262,7 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=torch.float16,  # fp16 for T4 (no native bfloat16)
         bnb_4bit_use_double_quant=True,
     )
     model = AutoModelForCausalLM.from_pretrained(
@@ -265,8 +278,13 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     lora_config = LoraConfig(
         r=lora_cfg.get("r", int(os.environ.get("LORA_R", 16))),
         lora_alpha=lora_cfg.get("lora_alpha", int(os.environ.get("LORA_ALPHA", 32))),
-        lora_dropout=lora_cfg.get("lora_dropout", float(os.environ.get("LORA_DROPOUT", 0.05))),
-        target_modules=lora_cfg.get("target_modules", os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(",")),
+        lora_dropout=lora_cfg.get(
+            "lora_dropout", float(os.environ.get("LORA_DROPOUT", 0.05))
+        ),
+        target_modules=lora_cfg.get(
+            "target_modules",
+            os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(","),
+        ),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -278,19 +296,32 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     dataset = load_dataset("json", data_files=str(dataset_path), split="train")
 
     # ── Train ─────────────────────────────────────────────────────────────────
-    logger.info("training_start", extra={"samples": len(dataset), "epochs": train_cfg.get("num_train_epochs", 3)})
+    logger.info(
+        "training_start",
+        extra={"samples": len(dataset), "epochs": train_cfg.get("num_train_epochs", 3)},
+    )
 
     sft_config = SFTConfig(
         output_dir=str(output_dir),
-        num_train_epochs=train_cfg.get("num_train_epochs", int(os.environ.get("TRAIN_EPOCHS", 3))),
-        per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", int(os.environ.get("TRAIN_BATCH_SIZE", 4))),
-        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", int(os.environ.get("TRAIN_GRAD_ACCUM", 4))),
-        learning_rate=train_cfg.get("learning_rate", float(os.environ.get("TRAIN_LR", 2e-4))),
-        max_seq_length=train_cfg.get("max_seq_length", int(os.environ.get("MAX_SEQ_LENGTH", 512))),
+        num_train_epochs=train_cfg.get(
+            "num_train_epochs", int(os.environ.get("TRAIN_EPOCHS", 3))
+        ),
+        per_device_train_batch_size=train_cfg.get(
+            "per_device_train_batch_size", int(os.environ.get("TRAIN_BATCH_SIZE", 4))
+        ),
+        gradient_accumulation_steps=train_cfg.get(
+            "gradient_accumulation_steps", int(os.environ.get("TRAIN_GRAD_ACCUM", 4))
+        ),
+        learning_rate=train_cfg.get(
+            "learning_rate", float(os.environ.get("TRAIN_LR", 2e-4))
+        ),
+        max_seq_length=train_cfg.get(
+            "max_seq_length", int(os.environ.get("MAX_SEQ_LENGTH", 512))
+        ),
         lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
         warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
-        bf16=True,
-        fp16=False,
+        bf16=False,  # T4 does not support bfloat16
+        fp16=True,  # use fp16 for T4 (Turing architecture)
         optim="paged_adamw_8bit",
         logging_steps=10,
         save_steps=50,

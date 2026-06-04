@@ -210,6 +210,79 @@ for VAR in "${OPTIONAL_VARS[@]}"; do
 done
 
 # =============================================================================
+# SECTION 3.5 — ALWAYS: Model selection
+# =============================================================================
+header "Model selection"
+
+# Preset model list — add/remove entries here to change the menu
+PRESET_MODELS=(
+  "cognitivecomputations/dolphin-2.9-mistral-7b-v2"
+  "meta-llama/Llama-3.2-1B-Instruct"
+  "Qwen/Qwen2.5-1.5B-Instruct"
+  "mistralai/Mistral-7B-Instruct-v0.3"
+  "mistralai/Mistral-7B-v0.3"
+)
+
+# Read current value from .env
+CURRENT_MODEL=$(grep -E "^BASE_MODEL=" "$REPO_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]')
+CURRENT_MODEL="${CURRENT_MODEL:-unset}"
+
+# Skip prompt in non-interactive / CI environments
+if [[ "${CI:-false}" == "true" || ! -t 0 ]]; then
+  ok "Non-interactive mode — keeping current model: ${CURRENT_MODEL}"
+else
+  echo ""
+  echo -e "  ${BOLD}Current model:${NC} ${CURRENT_MODEL}"
+  echo ""
+  echo -e "  ${BOLD}Available models:${NC}"
+  for i in "${!PRESET_MODELS[@]}"; do
+    LABEL=""
+    if [[ "${PRESET_MODELS[$i]}" == "$CURRENT_MODEL" ]]; then
+      LABEL=" ${GREEN}[active]${NC}"
+    fi
+    echo -e "    $((i+1))) ${PRESET_MODELS[$i]}${LABEL}"
+  done
+  echo -e "    $((${#PRESET_MODELS[@]}+1))) Enter a custom HuggingFace model ID"
+  echo ""
+  echo -e "  ${YELLOW}Select [1-$((${#PRESET_MODELS[@]}+1))], or press Enter to keep current:${NC} " && read -r MODEL_CHOICE
+
+  if [[ -z "$MODEL_CHOICE" ]]; then
+    ok "Keeping current model: ${CURRENT_MODEL}"
+    NEW_MODEL=""
+  elif [[ "$MODEL_CHOICE" =~ ^[0-9]+$ ]] && \
+       [[ "$MODEL_CHOICE" -ge 1 ]] && \
+       [[ "$MODEL_CHOICE" -le "${#PRESET_MODELS[@]}" ]]; then
+    NEW_MODEL="${PRESET_MODELS[$((MODEL_CHOICE-1))]}"
+  elif [[ "$MODEL_CHOICE" == "$((${#PRESET_MODELS[@]}+1))" ]]; then
+    echo -e "  ${YELLOW}Enter HuggingFace model ID (e.g. org/model-name):${NC} " && read -r NEW_MODEL
+    if [[ -z "$NEW_MODEL" ]]; then
+      ok "No model entered — keeping current: ${CURRENT_MODEL}"
+      NEW_MODEL=""
+    fi
+  else
+    warn "Invalid selection '${MODEL_CHOICE}' — keeping current model: ${CURRENT_MODEL}"
+    NEW_MODEL=""
+  fi
+
+  if [[ -n "$NEW_MODEL" && "$NEW_MODEL" != "$CURRENT_MODEL" ]]; then
+    # Update BASE_MODEL in .env (replace the active line, leave commented-out lines untouched)
+    sed -i "s|^BASE_MODEL=.*|BASE_MODEL=${NEW_MODEL}|" "$REPO_DIR/.env"
+    # Update or insert HF_ENDPOINT_MODEL
+    if grep -qE "^HF_ENDPOINT_MODEL=" "$REPO_DIR/.env"; then
+      sed -i "s|^HF_ENDPOINT_MODEL=.*|HF_ENDPOINT_MODEL=${NEW_MODEL}|" "$REPO_DIR/.env"
+    else
+      echo "HF_ENDPOINT_MODEL=${NEW_MODEL}" >> "$REPO_DIR/.env"
+    fi
+    ok "Model updated: ${NEW_MODEL}"
+    info ".env written. The new model will be downloaded on next container start."
+    info "To switch a running stack without full redeploy:"
+    info "  docker compose restart model_server"
+  elif [[ -n "$NEW_MODEL" ]]; then
+    ok "Selected model is already active: ${CURRENT_MODEL}"
+  fi
+fi
+
+# =============================================================================
 # SECTION 4 — ALWAYS: Pull latest code
 # =============================================================================
 header "Pulling latest code"

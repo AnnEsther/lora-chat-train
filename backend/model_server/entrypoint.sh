@@ -9,7 +9,10 @@
 set -euo pipefail
 
 HF_CACHE_DIR="${HF_HOME:-/root/.cache/huggingface}"
-BASE_MODEL="${BASE_MODEL:-meta-llama/Llama-3.2-1B-Instruct}"
+# BASE_MODEL is set at runtime via env_file: .env in docker-compose.yml.
+# The fallback here is only used when running the container directly (outside Compose).
+# To change the model, edit .env or use ./start.sh which presents a model selector.
+BASE_MODEL="${BASE_MODEL:-cognitivecomputations/dolphin-2.9-mistral-7b-v2}"
 HF_TOKEN="${HF_TOKEN:-}"
 
 # Derive the expected cache subdirectory from the model repo id.
@@ -38,7 +41,7 @@ import os, sys
 from huggingface_hub import snapshot_download
 
 token = os.environ.get('HF_TOKEN') or None
-model = os.environ.get('BASE_MODEL', 'meta-llama/Llama-3.2-1B-Instruct')
+model = os.environ.get('BASE_MODEL', 'cognitivecomputations/dolphin-2.9-mistral-7b-v2')
 cache = os.environ.get('HF_HOME', '/root/.cache/huggingface')
 
 print(f'[entrypoint] Downloading {model} to {cache} ...', flush=True)

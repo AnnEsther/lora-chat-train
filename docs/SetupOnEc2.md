@@ -1,8 +1,8 @@
 # Setup on EC2 — LoRA Chat & Train
 
-Complete step-by-step guide for deploying the stack on an AWS EC2 GPU instance
-(Tesla T4 / g4dn.xlarge). Based on real deployment experience — includes all the
-gotchas that aren't in the original docs.
+Complete step-by-step guide for deploying the full stack on an AWS EC2 GPU instance.
+Covers everything from launching the instance to verifying a training run end-to-end.
+Based on real deployment experience — every gotcha is documented.
 
 ---
 
@@ -11,57 +11,58 @@ gotchas that aren't in the original docs.
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
 | Instance type | `g4dn.xlarge` | `g4dn.xlarge` |
-| GPU | Tesla T4 (16GB VRAM) | Tesla T4 (16GB VRAM) |
+| GPU | Tesla T4 (16 GB VRAM) | Tesla T4 (16 GB VRAM) |
 | vCPU | 4 | 4 |
-| RAM | 16GB | 16GB |
-| Root volume | 30GB | 30GB |
-| **Data volume** | **100GB** | **120GB** |
+| RAM | 16 GB | 16 GB |
+| Root volume | 30 GB gp3 | 30 GB gp3 |
+| **Data volume** | **100 GB gp3** | **120 GB gp3** |
 | OS | Ubuntu 22.04 LTS | Ubuntu 22.04 LTS |
 
-> ⚠️ **Critical:** Always attach a **separate data volume** (100GB+) at launch time.
-> The root volume fills up fast with Docker images, CUDA layers, and model weights.
+> **Critical:** Always attach a **separate data volume** (100 GB+) at launch.
+> The 30 GB root volume fills fast with Docker images, CUDA layers, and model weights.
 > Forgetting this causes cryptic `No space left on device` errors mid-build.
 
 ---
 
-## Step 1 — Launch the EC2 Instance
+## Step 1 — Launch the Instance
 
-### 1.1 In the AWS Console
+### 1.1 AWS Console
 
-1. Go to EC2 → Launch Instance
-2. Choose **Ubuntu Server 22.04 LTS (HVM), SSD Volume Type**
+1. EC2 → Launch Instance
+2. AMI: **Ubuntu Server 22.04 LTS (HVM), SSD Volume Type**
 3. Instance type: **g4dn.xlarge**
-4. Key pair: create or select an existing one
+4. Key pair: create or select
 5. Security group — open these ports:
 
 | Port | Protocol | Source | Purpose |
 |------|----------|--------|---------|
-| 22 | TCP | Your IP only | SSH |
-| 80 | TCP | 0.0.0.0/0 | HTTP |
-| 443 | TCP | 0.0.0.0/0 | HTTPS |
-| 3000 | TCP | 0.0.0.0/0 | Frontend (if no nginx) |
-| 8000 | TCP | 0.0.0.0/0 | Backend API (if no nginx) |
+| 22 | TCP | Your IP | SSH |
+| 80 | TCP | 0.0.0.0/0 | HTTP → HTTPS redirect |
+| 443 | TCP | 0.0.0.0/0 | HTTPS (nginx) |
 
-6. Storage — **this is the critical part**:
+6. Storage:
    - Root volume (`/dev/sda1`): **30 GB gp3**
-   - Add a second volume: **120 GB gp3** — this is where Docker will live
+   - Add a second EBS volume: **120 GB gp3** — this is where Docker lives
 
 7. Launch.
 
-### 1.2 Allocate and associate an Elastic IP
-
-So the instance IP doesn't change on restart:
+### 1.2 Allocate an Elastic IP
 
 ```bash
-# In AWS Console: EC2 → Elastic IPs → Allocate → Associate to instance
-# Or via CLI:
+# AWS Console: EC2 → Elastic IPs → Allocate → Associate to instance
+# Or CLI:
 aws ec2 allocate-address --domain vpc
 aws ec2 associate-address --instance-id i-XXXXX --allocation-id eipalloc-XXXXX
 ```
 
+### 1.3 Point your domain
+
+Add an A record in your DNS pointing `your-domain.com` to the Elastic IP.
+Wait for DNS to propagate before running Certbot (Step 10).
+
 ---
 
-## Step 2 — First SSH and System Setup
+## Step 2 — First SSH and System Prep
 
 ```bash
 ssh -i ~/.ssh/your-key.pem ubuntu@YOUR_ELASTIC_IP
@@ -75,46 +76,38 @@ sudo apt-get update && sudo apt-get upgrade -y
 
 ### 2.2 Mount the data volume
 
-**Do this before installing anything.** Find the data volume device name:
+Find the device name:
 
 ```bash
 lsblk
-# Look for the large unformatted disk — usually nvme1n1
-# Example output:
-# nvme0n1   30G  ← root volume
-# nvme1n1  120G  ← data volume (unformatted, no MOUNTPOINTS)
+# nvme0n1   30G   ← root (has MOUNTPOINT /)
+# nvme1n1  120G   ← data volume (no MOUNTPOINT — unformatted)
 ```
 
-Format and mount it:
+Format, mount, make permanent:
 
 ```bash
 sudo mkfs.ext4 /dev/nvme1n1
 sudo mkdir -p /mnt/data
 sudo mount /dev/nvme1n1 /mnt/data
-
-# Make permanent across reboots
 echo '/dev/nvme1n1 /mnt/data ext4 defaults 0 2' | sudo tee -a /etc/fstab
-
-# Verify
-df -h /mnt/data
-# Should show ~116GB available
+df -h /mnt/data   # verify ~116 GB available
 ```
 
 ---
 
 ## Step 3 — Move ALL System Storage to the Data Volume
 
-**Do all of this before pulling any Docker images or building anything.**
+Do this **before** pulling any Docker images or building anything. On Ubuntu 22.04
+GPU instances, three things silently eat the 30 GB root volume:
 
-On Ubuntu 22.04 GPU instances, three things silently eat the 30GB root volume:
+| What | Default location | Post-build size | Fix |
+|------|-----------------|-----------------|-----|
+| Docker images/layers | `/var/lib/docker` | 5–20 GB | Move via `daemon.json` |
+| containerd snapshots | `/var/lib/containerd` | **~16 GB** | Symlink to data volume |
+| snapd packages | `/var/lib/snapd` | ~200 MB | Remove entirely |
 
-| What | Default location | Size after builds | Fix |
-|---|---|---|---|
-| Docker images/volumes | `/var/lib/docker` | 5-20GB | Move via `daemon.json` |
-| containerd snapshots | `/var/lib/containerd` | **~16GB** | Symlink to data volume |
-| snapd packages | `/var/lib/snapd` | ~200MB | Remove entirely |
-
-### 3.1 Move Docker to the data volume
+### 3.1 Move Docker
 
 ```bash
 sudo systemctl stop docker
@@ -127,18 +120,15 @@ sudo tee /etc/docker/daemon.json << 'EOF'
 EOF
 
 sudo systemctl start docker
-
-# Verify
 docker info | grep "Docker Root Dir"
-# Expected: Docker Root Dir: /mnt/data/docker
+# Must show: Docker Root Dir: /mnt/data/docker
 ```
 
-### 3.2 Move containerd to the data volume
+### 3.2 Move containerd (the one most people miss)
 
-> ⚠️ This is the one most people miss. containerd manages its own snapshot store
-> at `/var/lib/containerd` **independently** of Docker's `data-root`. After a few
-> builds of a CUDA image it will silently accumulate 16GB+ on the root volume
-> even though Docker is correctly pointing at the data volume.
+containerd manages its own snapshot store at `/var/lib/containerd` **independently**
+of Docker's `data-root`. After a few CUDA image builds it silently accumulates 16 GB+
+on the root volume even though Docker is pointing at the data volume.
 
 ```bash
 sudo systemctl stop docker
@@ -147,21 +137,17 @@ sudo systemctl stop containerd
 sudo mv /var/lib/containerd /mnt/data/containerd
 sudo ln -s /mnt/data/containerd /var/lib/containerd
 
-# Verify symlink
 ls -la /var/lib/containerd
-# lrwxrwxrwx ... /var/lib/containerd -> /mnt/data/containerd
+# Must be: lrwxrwxrwx ... /var/lib/containerd -> /mnt/data/containerd
 
 sudo systemctl start containerd
 sudo systemctl start docker
 
-# Verify both are on data volume
 docker info | grep "Docker Root Dir"   # /mnt/data/docker
-sudo du -sh /mnt/data/containerd       # size shown here, not on root
+sudo du -sh /mnt/data/containerd       # size here, not on root
 ```
 
 ### 3.3 Remove snapd
-
-Snap packages are not needed for this stack:
 
 ```bash
 sudo snap remove --purge amazon-ssm-agent 2>/dev/null || true
@@ -170,47 +156,38 @@ sudo apt-get purge -y snapd
 sudo rm -rf /var/lib/snapd /snap
 ```
 
-### 3.4 Clean up apt cache and old packages
+### 3.4 Clean apt cache and journals
 
 ```bash
-sudo apt-get clean
-sudo apt-get autoremove --purge -y
+sudo apt-get clean && sudo apt-get autoremove --purge -y
 sudo journalctl --vacuum-size=100M
 ```
 
 ### 3.5 Verify root volume usage
 
-After all moves, root should be well under 30% used:
-
 ```bash
 df -h /
-# Expected: ~5-6GB used out of 28GB
-
-sudo du -sh /var/* 2>/dev/null | sort -rh | head -5
-# /var/lib should now be small (no docker, no containerd, no snapd)
+# Expected: ~5–6 GB used out of 28 GB
 ```
 
 ---
 
 ## Step 4 — Install NVIDIA Drivers and Container Toolkit
 
-### 4.1 Install NVIDIA drivers
+### 4.1 NVIDIA drivers
 
 ```bash
-# Check if already installed
-nvidia-smi
+nvidia-smi   # if this works, drivers already installed — skip to 4.2
 
-# If not installed:
+# Otherwise:
 sudo apt-get install -y ubuntu-drivers-common
 sudo ubuntu-drivers autoinstall
 sudo reboot
-# SSH back in after reboot
-nvidia-smi  # should show Tesla T4
+# SSH back in
+nvidia-smi   # must show Tesla T4
 ```
 
-### 4.2 Install NVIDIA Container Toolkit
-
-This allows Docker containers to access the GPU:
+### 4.2 NVIDIA Container Toolkit
 
 ```bash
 curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
@@ -224,37 +201,46 @@ sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 
-# Verify GPU is accessible in Docker
+# Verify
 docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
-# Should show Tesla T4
+# Must show Tesla T4
 ```
 
 ---
 
-## Step 5 — Clone the Repository
+## Step 5 — Install nginx and Certbot
+
+```bash
+sudo apt-get install -y nginx certbot python3-certbot-nginx
+sudo systemctl enable nginx
+```
+
+---
+
+## Step 6 — Clone the Repository
 
 ```bash
 cd /home/ubuntu
-git clone https://github.com/AnnEsther/lora-chat-train.git
+git clone https://github.com/YourOrg/lora-chat-train.git
 cd lora-chat-train
 ```
 
 ---
 
-## Step 6 — Configure Environment Variables
+## Step 7 — Configure Environment Variables
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-Fill in every value. Key variables:
+Required values:
 
 ```ini
 # ── Database ───────────────────────────────────────────────────────────────────
 DATABASE_URL=postgresql+asyncpg://lora:lora@postgres:5432/lora
 POSTGRES_USER=lora
-POSTGRES_PASSWORD=lora
+POSTGRES_PASSWORD=lora        # change this
 POSTGRES_DB=lora
 
 # ── Redis / Celery ─────────────────────────────────────────────────────────────
@@ -266,29 +252,29 @@ CELERY_RESULT_BACKEND=redis://redis:6379/1
 HF_TOKEN=hf_your_actual_token
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
 
-# ── HF vLLM Inference Endpoint ─────────────────────────────────────────────────
-HF_ENDPOINT_URL=https://your-endpoint.us-east-1.aws.endpoints.huggingface.cloud
-
-# ── Training (leave empty to train locally on the T4) ─────────────────────────
-HF_TRAINING_ENDPOINT=
-
-# ── AWS S3 ─────────────────────────────────────────────────────────────────────
-AWS_ACCESS_KEY_ID=your_key
-AWS_SECRET_ACCESS_KEY=your_secret
-AWS_DEFAULT_REGION=us-east-1
-S3_BUCKET=your-lora-bucket
-
-# ── Slack ──────────────────────────────────────────────────────────────────────
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
-
-# ── Frontend URLs ──────────────────────────────────────────────────────────────
+# ── Frontend URLs (baked into the Next.js bundle at build time) ────────────────
 NEXT_PUBLIC_API_URL=https://your-domain.com/api
 NEXT_PUBLIC_MODEL_SERVER_URL=https://your-domain.com/model
 
-# ── Training tuning ────────────────────────────────────────────────────────────
-MAX_FACTS_PER_CANDIDATE=3
-QA_BATCH_SIZE=5
-QA_SYNTHESIS_TIMEOUT=20
+# ── CORS (must match the public domain) ───────────────────────────────────────
+EXTERNAL_SITE_ORIGIN=https://your-domain.com
+
+# ── Internal service URLs ──────────────────────────────────────────────────────
+MODEL_SERVER_URL=http://model_server:8001
+
+# ── AWS S3 (optional — falls back to local filesystem) ────────────────────────
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_DEFAULT_REGION=us-east-1
+S3_BUCKET=
+
+# ── Slack notifications (optional) ────────────────────────────────────────────
+SLACK_WEBHOOK_URL=
+
+# ── Training defaults ──────────────────────────────────────────────────────────
+MIN_TRAINING_SAMPLES=10
+MAX_SESSION_TOKENS=4096
+PRE_SLEEP_THRESHOLD=512
 TRAIN_BATCH_SIZE=4
 MAX_SEQ_LENGTH=512
 TRAIN_EPOCHS=3
@@ -298,69 +284,91 @@ LORA_DROPOUT=0.05
 LORA_TARGET_MODULES=q_proj,v_proj
 ```
 
+> **NEXT_PUBLIC_* are build-time.** They are baked into the Next.js JavaScript bundle
+> when `docker compose build frontend` runs. If you change them later, you must rebuild
+> the frontend image.
+
 ---
 
-## Step 7 — Verify docker-compose.yml GPU Config
+## Step 8 — Configure nginx
 
-The `worker` service must have the GPU reservation, adapter volume, and concurrency=1:
+```bash
+sudo cp infra/nginx/lora-chat /etc/nginx/sites-available/lora-chat
+# Edit the domain name if needed:
+sudo nano /etc/nginx/sites-available/lora-chat
 
-```yaml
-worker:
-  build:
-    context: ./worker
-    dockerfile: Dockerfile
-  <<: *common-env
-  depends_on:
-    postgres:
-      condition: service_healthy
-    redis:
-      condition: service_healthy
-  volumes:
-    - ./worker:/app
-    - ./shared:/app/shared
-    - ./training:/app/training
-    - ./outputs:/app/outputs
-    - ./backend:/app/backend
-    - adapter_store:/adapters          # ← required for saving trained adapters
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: "nvidia"
-            count: 1
-            capabilities: ["gpu"]
-  restart: unless-stopped
-  command: celery -A tasks worker --loglevel=info --concurrency=1  # ← 1, not 2
+sudo ln -sf /etc/nginx/sites-available/lora-chat /etc/nginx/sites-enabled/lora-chat
+sudo rm -f /etc/nginx/sites-enabled/default
+
+sudo nginx -t          # must say "syntax is ok"
+sudo systemctl reload nginx
+```
+
+The nginx config proxies:
+
+| Path | Service | Notes |
+|------|---------|-------|
+| `/` | `localhost:3000` | Frontend; basic auth via htpasswd |
+| `/api/` | `localhost:8000` | Backend; strips `/api` prefix; `proxy_buffering off` for SSE |
+| `/model/` | `localhost:8001` | Model server; strips `/model` prefix |
+| `/glyph` | `localhost:3001` | Glyph chat static app |
+
+### Set up basic auth (optional but recommended)
+
+```bash
+sudo apt-get install -y apache2-utils
+sudo htpasswd -c /etc/nginx/.htpasswd your-username
+# Enter password when prompted
 ```
 
 ---
 
-## Step 8 — Build and Start
+## Step 9 — Issue TLS Certificate
+
+Make sure DNS has propagated (your domain resolves to the Elastic IP) before running this:
 
 ```bash
+sudo certbot --nginx -d your-domain.com
+# Follow prompts; select "Redirect" to force HTTPS
+# Auto-renews via systemd timer — no action needed
+```
+
+Verify:
+
+```bash
+sudo certbot renew --dry-run   # test renewal works
+```
+
+---
+
+## Step 10 — Build and Start All Services
+
+```bash
+cd /home/ubuntu/lora-chat-train
 docker compose up --build -d
 
 # Watch startup logs
-docker compose logs -f
+docker compose logs -f --tail=50
 ```
 
-Expected healthy state:
+Expected healthy state after ~3–5 minutes (model download on first start):
 
 ```bash
 docker compose ps
-# postgres     running (healthy)
-# redis        running (healthy)
-# backend      running
-# worker       running
-# model_server running
-# frontend     running
+# NAME          STATUS
+# postgres      running (healthy)
+# redis         running (healthy)
+# backend       running
+# worker        running
+# model_server  running
+# frontend      running
 ```
 
-### Verify GPU is accessible in the worker
+### Verify GPU access in containers
 
 ```bash
 docker compose exec worker nvidia-smi
-# Should show Tesla T4
+# Must show Tesla T4
 
 docker compose exec worker python3 -c \
   "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
@@ -369,17 +377,17 @@ docker compose exec worker python3 -c \
 
 ---
 
-## Step 9 — Initialize the Database
+## Step 11 — Initialize the Database
 
-The schema is applied automatically on first start via Docker's `initdb.d` mount.
+The schema is applied automatically on first start via Docker's `initdb.d/` volume mount.
 Verify:
 
 ```bash
 docker compose exec postgres psql -U lora -d lora -c "\dt"
-# Should list all tables: sessions, turns, training_candidates, etc.
+# Must list: sessions, turns, training_candidates, synthesized_qa, datasets, ...
 ```
 
-If tables are missing (e.g. volume already existed from a previous run):
+If tables are missing (e.g. the volume already existed from a previous run):
 
 ```bash
 docker compose exec postgres psql -U lora -d lora \
@@ -388,103 +396,69 @@ docker compose exec postgres psql -U lora -d lora \
 
 ---
 
-## Step 10 — Set Up nginx + HTTPS (Optional but Recommended)
-
-### 10.1 Install nginx and Certbot
+## Step 12 — Smoke Test
 
 ```bash
-sudo apt-get install -y nginx certbot python3-certbot-nginx
-```
-
-### 10.2 Create nginx config
-
-```bash
-sudo nano /etc/nginx/sites-available/lora-chat
-```
-
-```nginx
-server {
-    listen 80;
-    server_name your-domain.com;
-
-    # Frontend
-    location / {
-        proxy_pass http://localhost:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-    }
-
-    # Backend API + SSE streaming
-    location /api/ {
-        rewrite ^/api(/.*)$ $1 break;
-        proxy_pass http://localhost:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        # SSE — disable buffering
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 3600s;
-        chunked_transfer_encoding on;
-    }
-}
-```
-
-```bash
-sudo ln -s /etc/nginx/sites-available/lora-chat /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### 10.3 Issue TLS certificate
-
-```bash
-sudo certbot --nginx -d your-domain.com
-# Follow prompts — auto-renews via systemd timer
-```
-
----
-
-## Step 11 — Health Checks
-
-```bash
-# All services running
-docker compose ps
-
-# Backend
+# Backend health
 curl http://localhost:8000/health
 # {"status":"ok"}
 
-# Model server (HF proxy)
+# Model server health
 curl http://localhost:8001/health
-# {"status":"ok","model_loaded":true,"remote_healthy":true}
+# {"status":"ok","model_loaded":true,...}
 
-# GPU utilization baseline (0% when idle)
-nvidia-smi
+# Frontend accessible
+curl -sI http://localhost:3000 | head -3
+# HTTP/1.1 200 OK (or 401 if basic auth is on — that's correct)
 
-# Database has tables
-docker compose exec postgres psql -U lora -d lora -c "\dt"
+# Through nginx with HTTPS
+curl https://your-domain.com/api/health
+# {"status":"ok"}
 ```
 
 ---
 
-## Step 12 — Test the Training Pipeline
+## Step 13 — Test the Full Training Pipeline
 
-1. Open the frontend at `https://your-domain.com`
-2. Start a chat and teach the model something for 5-10 turns
-3. Type `/sleep` to trigger training
-4. Watch Slack for notifications — expected sequence:
-   - ✅ Curation Completed
-   - ℹ️ Knowledge Extracted
-   - ℹ️ QA Synthesized
-   - ✅ Training Data Ready ← review modal opens here
-5. Review the QA pairs in the modal, click **Validate All & Start Training**
-6. Watch GPU spin up: `watch -n 3 nvidia-smi` — expect 60-80% utilization
-7. Training completes in ~5-10 minutes for a small session
-8. Slack notifications: Training Started → Training Succeeded → Evaluation → Deployed
+1. Open `https://your-domain.com` in a browser
+2. Send several passages to generate Q&A pairs (aim for 10+ pairs)
+3. Use the inline deck below each message to validate pairs:
+   - Click **Mark validated** (auto-advances to next card)
+   - Or **Validate all** to approve all pairs at once
+4. Once the **Start Training** button shows `(10/10)` or more, click it
+5. Monitor training:
+
+```bash
+watch -n 5 docker compose logs worker --tail=20
+watch -n 3 nvidia-smi   # expect 60–80% GPU utilization during training
+```
+
+6. After training completes (~5–15 min), the session transitions to `READY`
+7. Verify the new adapter was saved:
+
+```bash
+docker compose exec model_server ls /adapters/current/
+# adapter_model.safetensors  adapter_config.json  manifest.json
+```
+
+---
+
+## Partial Updates (day-to-day)
+
+When you push code changes, rebuild only the affected service:
+
+```bash
+# Backend (e.g. backend/main.py changes)
+git pull && docker compose build backend && docker compose up -d --no-deps backend
+
+# Frontend (e.g. frontend/app/page.tsx changes)
+git pull && docker compose build frontend && docker compose up -d --no-deps frontend
+
+# Worker (e.g. worker/tasks.py or training/ changes)
+git pull && docker compose build worker && docker compose up -d --no-deps worker
+```
+
+`--no-deps` restarts only the named container; all other services keep running.
 
 ---
 
@@ -492,115 +466,156 @@ docker compose exec postgres psql -U lora -d lora -c "\dt"
 
 ### `No space left on device` during Docker build
 
-Check which disk Docker and containerd are actually using:
-
 ```bash
 docker info | grep "Docker Root Dir"
-# Must show /mnt/data/docker — if not, redo Step 3.1
+# Must be /mnt/data/docker — if not, redo Step 3.1
 
 ls -la /var/lib/containerd
 # Must be a symlink → /mnt/data/containerd — if a real dir, redo Step 3.2
 
-df -h /mnt/data   # check space on data volume
-df -h /           # check root volume
+df -h /mnt/data     # check data volume space
+df -h /             # check root volume space
 
-# If containerd is still a real directory eating space:
-sudo systemctl stop docker containerd
-sudo mv /var/lib/containerd /mnt/data/containerd
-sudo ln -s /mnt/data/containerd /var/lib/containerd
-sudo systemctl start containerd docker
+docker system df    # Docker breakdown: images, containers, volumes, cache
+docker system prune -f   # free up dangling images and stopped containers
 ```
 
 ### Worker keeps restarting
 
 ```bash
 docker compose logs worker --tail=50
-# Check for import errors, missing env vars, or Redis connection issues
+# Look for: import errors, missing env vars, Redis connection refused, CUDA OOM
 ```
 
-### `AttributeError: 'NoneType' object has no attribute 'Redis'`
+### Training fails with "An error occurred while generating the dataset"
 
-Redis package conflict on the CUDA base image. Pin versions in `worker/requirements.txt`:
+This was a known bug — the inline chat flow stored QA data in `synthesized_qa` but the
+training pipeline read from `training_candidates`. **Fixed in backend/main.py**: the
+`_promote_qa_to_candidates()` helper now converts validated QA pairs into
+`TrainingCandidate` rows before Phase 2 is enqueued. Ensure you have pulled the latest
+code and rebuilt the backend image.
 
-```
-redis==5.1.1
-kombu==5.3.4
-```
+### Glyph Chat still using adapter after switching to Base Model
 
-### GPU not visible in worker container
+This was a known bug — `POST /chat/direct` was not sending the unload call when
+`adapter_id == "base"`. **Fixed in backend/main.py**: an explicit
+`POST /reload_adapter {"adapter_dir": "base"}` is now sent, triggering
+`merge_and_unload()` on the model server. Rebuild the backend image.
+
+### GPU not visible in worker or model_server container
 
 ```bash
-# Check toolkit is installed
+# Test toolkit is installed
 docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi
 
-# Check docker-compose.yml has the deploy.resources block
-# Check concurrency=1 (not 2) in the worker command
+# Check docker-compose.yml for deploy.resources block
+# Check worker command has --concurrency=1
 ```
 
-### Training hangs in `synthesize_qa` for 30+ minutes
-
-Facts are being processed one at a time. Check `.env`:
-
-```ini
-QA_BATCH_SIZE=5
-QA_SYNTHESIS_TIMEOUT=20
-MAX_FACTS_PER_CANDIDATE=3
-```
-
-### Session stuck in TRAINING state after a failed run
+### Session stuck in TRAINING state
 
 ```bash
 docker compose exec postgres psql -U lora -d lora -c \
-  "UPDATE sessions SET state='VALIDATING' WHERE id='your-session-id';"
+  "UPDATE sessions SET state='ACTIVE' WHERE id='your-session-uuid';"
 ```
 
-### `train_local` returns None / TypeError on `upload_adapter`
+### CORS errors in browser (`Access-Control-Allow-Origin`)
 
-The `train_local` function body is missing from `hf_launcher.py`. Check:
+Check `EXTERNAL_SITE_ORIGIN` in `.env` matches the public domain exactly (including
+`https://`). Rebuild the backend image after changing it.
+
+### nginx 502 Bad Gateway
 
 ```bash
-wc -l training/trainer/hf_launcher.py
-# Should be 300+ lines — if ~220, the training body is truncated
-tail -20 training/trainer/hf_launcher.py
-# Should end with: return output_dir
+docker compose ps   # check all services are running
+curl http://localhost:8000/health   # backend reachable?
+curl http://localhost:8001/health   # model server reachable?
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Model server OOM (CUDA out of memory)
+
+Only one of `worker` and `model_server` can hold the model in VRAM at a time.
+Training is handled by the worker which loads its own model instance.
+Ensure `--concurrency=1` in the worker command and that no other GPU processes
+are running:
+
+```bash
+nvidia-smi   # check all processes and VRAM usage
 ```
 
 ---
 
 ## Maintenance
 
-### Restart all services after a code change
-
-```bash
-git pull
-docker compose up --build -d
-```
-
-### Restart just the worker (picks up code changes instantly via volume mount)
-
-```bash
-docker compose restart worker
-```
-
 ### Check disk usage
 
 ```bash
-df -h                              # overall — root and data volume
-sudo du -sh /mnt/data/*            # breakdown of everything on data volume
-docker system df                   # Docker-specific: images, containers, volumes, cache
+df -h                            # root and data volumes
+sudo du -sh /mnt/data/*          # breakdown of data volume
+docker system df                 # Docker-specific breakdown
 ```
 
 ### Free up disk space
 
 ```bash
-docker system prune -f             # stopped containers + dangling images
-docker system prune -af            # ALL unused images (more aggressive)
-sudo journalctl --vacuum-size=100M # trim system logs
-sudo apt-get clean                 # clear apt package cache
+docker system prune -f           # stopped containers + dangling images
+docker system prune -af          # ALL unused images (more aggressive)
+sudo journalctl --vacuum-size=100M
+sudo apt-get clean
 ```
 
-### Backup the database
+### Back up the database
 
 ```bash
 docker compose exec postgres pg_dump -U lora lora > backup_$(date +%Y%m%d).sql
 ```
+
+### Restart all services after a reboot
+
+```bash
+cd /home/ubuntu/lora-chat-train
+docker compose up -d
+```
+
+Add to `/etc/rc.local` or a systemd service to auto-start on boot:
+
+```bash
+sudo tee /etc/systemd/system/lora-chat.service << 'EOF'
+[Unit]
+Description=LoRA Chat & Train
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/ubuntu/lora-chat-train
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl enable lora-chat
+```
+
+### Renew TLS certificate
+
+Certbot installs a systemd timer that renews automatically. Check it:
+
+```bash
+sudo systemctl status certbot.timer
+sudo certbot renew --dry-run   # test
+```
+
+---
+
+## Change Log
+| Date | Change | Author |
+|------|--------|--------|
+| 2026-05-20 | Full rewrite: added Steps 5 (nginx install), 8 (nginx config), 9 (TLS), 12 (smoke test), 13 (pipeline test); updated training test to reflect inline deck + Start Training button flow; added Partial Updates section; expanded Troubleshooting with dataset bug, base model bug, CORS, OOM; added auto-start systemd service; added Certbot renewal note | opencode |
+| 2026-05-08 | Add containerd symlink step; add snapd removal; add disk verification step; expand env var examples; add training pipeline test section | opencode |
+| 2026-04-28 | Initial documentation created | opencode |

@@ -81,10 +81,13 @@ build_dataset
 - **Note:** This task is defined but is not wired into any of the three pipeline chains (`enqueue_phase1_pipeline`, `enqueue_phase2_pipeline`, `enqueue_training_pipeline`). It must be called manually if cross-session corpus merging is required.
 
 ### `build_dataset`
-- Input: included candidates from DB
+- Input: included candidates from DB (and promoted inline QA — see below)
+- Reads `TrainingCandidate` rows where `session_id = X AND included = True`
 - Runs `DatasetWriter.write_jsonl()` — writes chat-template-compatible JSONL
 - Uploads JSONL to S3
 - Persists `Dataset` record to DB
+
+> **Inline QA flow note:** When training is triggered via the chat UI (Start Training button or `/sleep`), the backend calls `_promote_qa_to_candidates()` **before** enqueueing Phase 2. This converts every validated `SynthesizedQA` row into a `TrainingCandidate` row (`included=True`, `quality_score=1.0`, `conversation=[{user: question}, {assistant: answer}]`). This means `build_dataset` works identically regardless of whether the data came from the Phase 1 curation pipeline or the inline chat flow. The idempotency key is stored in `rejection_reason` as `"qa:<uuid>"` to prevent duplicate rows on retry.
 
 ### `launch_training`
 - Input: dataset info dict (S3 path, local path)
@@ -134,6 +137,7 @@ build_dataset
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-05-20 | Fix "An error occurred while generating the dataset" training failure: added `_promote_qa_to_candidates()` helper to `backend/main.py`; called from both `start_training` endpoint and `_force_sleep()` before `enqueue_phase2_pipeline`; converts validated `SynthesizedQA` rows to `TrainingCandidate` rows so `build_dataset` finds data in the inline chat flow. No changes to worker/tasks.py or DatasetWriter. | opencode |
 | 2026-05-08 | Update line count; clarify launch_training config build and local-flag passthrough; note poll_training skips when local=True; note merge_corpus is not wired into any chain | opencode |
+| 2026-05-05 | Add Slack notifications to extract_knowledge, synthesize_qa, validate_qa | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
-| 2026-05-05 | Add Slack notifications to extract_knowledge, synthesize_qa, validate_qa (knowledge_extracted, qa_synthesized, training_data_ready) | opencode |

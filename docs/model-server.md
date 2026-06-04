@@ -61,7 +61,7 @@ vLLM returns OpenAI-format SSE (`choices[].delta.content`). `hf_serve.py` transl
 | `TEMPERATURE` | `0.7` | Default sampling temperature |
 
 ## Design Decisions
-- **bf16 throughout** (`local_gpu_serve.py`) — matches Qwen2.5's native dtype; avoids bfloat16/fp16 mismatch errors
+- **fp16 throughout** (`local_gpu_serve.py`) — required for NVIDIA T4 (g4dn.xlarge, Turing architecture); T4 has no native bfloat16 support
 - **4-bit NF4 quantization** via `BitsAndBytesConfig` — fits 7B+ models within 8 GB VRAM
 - **`_model_lock` (threading.Lock)** — protects all model state; inference returns HTTP 503 during active training
 - **Training on daemon thread** — `threading.Thread(daemon=True)` so training does not block the HTTP server
@@ -100,7 +100,7 @@ vLLM returns OpenAI-format SSE (`choices[].delta.content`). `hf_serve.py` transl
 
 ### `_load_base_model()`
 - Loads the base model from `BASE_MODEL` env var
-- Applies `BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=bfloat16, bnb_4bit_quant_type="nf4")`
+- Applies `BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=float16, bnb_4bit_quant_type="nf4")`
 - Sets `device_map="auto"` for multi-GPU spread
 
 ### `_load_adapter(adapter_dir)`
@@ -136,7 +136,7 @@ adapters/
 ## Configuration
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `BASE_MODEL` | `meta-llama/Llama-3.2-1B-Instruct` (serve.py) / `Qwen/Qwen2.5-1.5B-Instruct` (local_gpu_serve.py) | HuggingFace model ID |
+| `BASE_MODEL` | `meta-llama/Llama-3.2-1B-Instruct` (serve.py) / `cognitivecomputations/dolphin-2.9-mistral-7b-v2` (local_gpu_serve.py) | HuggingFace model ID |
 | `MODEL_SERVER_URL` | — | URL backend uses to reach this server |
 | `MAX_NEW_TOKENS` | `512` | Max tokens generated per response |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
@@ -144,10 +144,27 @@ adapters/
 | `ADAPTER_HISTORY_DIR` | `/adapters/history` | Archive path for previous adapters |
 | `HF_TOKEN` | — | Required by `serve.py` to load gated HF models |
 
+## `/chat/direct` Adapter Handling (Glyph Chat)
+
+The `/chat/direct` endpoint in `backend/main.py` is used by the `/glyph` frontend (stateless chat without a session). It handles adapter switching on every request:
+
+```
+adapter_id != "base"  →  look up adapter path, POST /reload_adapter with path
+adapter_id == "base"  →  POST /reload_adapter with {"adapter_dir": "base"}  ← explicit unload
+```
+
+**Before the fix (bug):** the `else` branch was missing. When `adapter_id == "base"`, nothing was sent to the model server — it kept whatever adapter was previously loaded. Users who switched the dropdown back to "Base model" were still talking to the LoRA-fine-tuned model.
+
+**After the fix:** an explicit `POST /reload_adapter {"adapter_dir": "base"}` is always sent when the user selects the base model, triggering `merge_and_unload()` on the GPU server to detach LoRA weights before inference runs.
+
+> **Note:** This fix only applies to `local_gpu_serve.py`. When using `hf_serve.py` (HF vLLM endpoint), `/reload_adapter` is a no-op stub and adapter switching of any kind is not supported — the vLLM endpoint always serves the model it was deployed with.
+
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-06-04 | Swap base model from meta-llama/Llama-3.2-1B-Instruct to cognitivecomputations/dolphin-2.9-mistral-7b-v2 (unfiltered Mistral 7B). Switch all dtype references from bfloat16/bf16 to float16/fp16 across local_gpu_serve.py, hf_launcher.py, evaluator.py, and test_train.py — required for NVIDIA T4 (Turing; no native bfloat16 support) on g4dn.xlarge. | opencode |
+| 2026-05-20 | Fix base model switching in /chat/direct: add else branch that explicitly calls POST /reload_adapter {"adapter_dir": "base"} when adapter_id == "base", so LoRA weights are detached before inference. Previously the model server kept the last loaded adapter when switching to base. | opencode |
 | 2026-05-08 | Expand serve.py endpoint table to include /adapters and /train/status; expand configuration table with defaults, ADAPTER_HISTORY_DIR, HF_TOKEN | opencode |
 | 2026-04-29 | Switched hf_serve.py from TGI to vLLM (TGI deprecated for new endpoints); HF_ENDPOINT_MODEL now defaults to BASE_MODEL | opencode |
 | 2026-04-29 | Added hf_serve.py — thin proxy to private HF Dedicated Inference Endpoint; no local GPU needed for inference | opencode |

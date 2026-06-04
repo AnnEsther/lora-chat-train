@@ -1,8 +1,8 @@
 """
 backend/model_server/local_gpu_serve.py
 
-Model server + local LoRA trainer for RTX 4060 (8GB VRAM).
-Uses Qwen2.5 / Llama with bf16 throughout to avoid bfloat16/fp16 mismatch.
+Model server + local LoRA trainer for NVIDIA T4 (16GB VRAM, g4dn.xlarge).
+Uses fp16 throughout — T4 (Turing) does not support bfloat16 natively.
 
 Run with:
     python backend/model_server/local_gpu_serve.py
@@ -49,7 +49,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BASE_MODEL = os.environ.get("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
+BASE_MODEL = os.environ.get(
+    "BASE_MODEL", "cognitivecomputations/dolphin-2.9-mistral-7b-v2"
+)
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 ADAPTER_DIR = Path(os.environ.get("ADAPTER_DIR", _root / "adapters" / "current"))
 HISTORY_DIR = Path(
@@ -93,7 +95,7 @@ def _check_gpu() -> None:
     logger.info(f"GPU detected: {name} ({vram:.1f} GB VRAM)")
 
 
-# ── BnB config — bf16 throughout to match Qwen's native dtype ────────────────
+# ── BnB config — fp16 throughout for T4 (Turing; no native bfloat16) ─────────
 
 
 def _bnb_config() -> BitsAndBytesConfig:
@@ -101,7 +103,7 @@ def _bnb_config() -> BitsAndBytesConfig:
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,  # must match torch_dtype below
+        bnb_4bit_compute_dtype=torch.float16,  # must match torch_dtype below
     )
 
 
@@ -126,7 +128,7 @@ def _load_base_model() -> None:
         device_map="auto",
         token=HF_TOKEN or None,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16,  # load everything in bf16
+        torch_dtype=torch.float16,  # load in fp16 — T4 does not support bfloat16
     )
     _model.config.use_cache = False
     _model.eval()
@@ -236,7 +238,7 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             quantization_config=_bnb_config(),
             device_map="auto",
             token=HF_TOKEN or None,
-            torch_dtype=torch.bfloat16,  # bf16 throughout — no fp16 mixing
+            torch_dtype=torch.float16,  # fp16 throughout — T4 does not support bfloat16
         )
         train_model.config.use_cache = False
 
@@ -260,8 +262,8 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
             learning_rate=TRAIN_LR,
             lr_scheduler_type="cosine",
             warmup_ratio=0.05,
-            fp16=False,  # must be False for Qwen/bf16 models
-            bf16=True,  # use bf16 — matches model's native dtype
+            fp16=True,  # T4 uses fp16; bfloat16 not supported on Turing GPUs
+            bf16=False,  # must be False for T4
             optim="paged_adamw_8bit",
             logging_steps=5,
             save_strategy="no",

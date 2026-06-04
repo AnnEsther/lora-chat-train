@@ -120,11 +120,34 @@ For HF-hosted inference (no local GPU): use `backend/model_server/hf_serve.py` w
 | `scripts/resume_training.py` | Re-queue training from a known `run_id` |
 | `scripts/test_train.py` | Standalone training smoke test (no full pipeline) |
 
+## Partial Updates on EC2
+
+When iterating on a single service, rebuild and restart only that container to avoid downtime on unrelated services:
+
+```bash
+# Backend only (e.g. after changes to backend/main.py)
+git pull && docker compose build backend && docker compose up -d --no-deps backend
+
+# Frontend only (e.g. after UI changes)
+git pull && docker compose build frontend && docker compose up -d --no-deps frontend
+
+# Worker only (e.g. after changes to worker/tasks.py or training/)
+git pull && docker compose build worker && docker compose up -d --no-deps worker
+
+# Everything
+git pull && docker compose build && docker compose up -d
+```
+
+`--no-deps` ensures only the named service is restarted — postgres, redis, model_server, etc. all keep running.
+
+> **Note:** `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_MODEL_SERVER_URL` are baked into the Next.js bundle at **build time**. If they change, a frontend rebuild is required. They are read from `.env` during `docker compose build`.
+
 ## Change Log
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
-| 2026-05-08 | Fix worker concurrency to 1; fix model_server Dockerfile to Dockerfile.model.gpu; note adapter_store shared with worker; add reset-all to Makefile table; expand env vars table with HF_ENDPOINT_URL, HF_TRAINING_ENDPOINT, AWS_REGION, LOCAL_OUTPUT_DIR, NEXT_PUBLIC_MODEL_SERVER_URL | opencode |
+| 2026-05-20 | Add Partial Updates on EC2 section with per-service rebuild commands | opencode |
+| 2026-05-18 | Fix 502 errors on EC2: change model_server to local_gpu_serve.py; add EXTERNAL_SITE_ORIGIN for CORS | opencode |
+| 2026-05-15 | Disk space optimisations: hf_cache volume; .dockerignore; make prune target | opencode |
+| 2026-05-08 | Fix worker concurrency to 1; expand env vars table | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
-| 2026-05-15 | Disk space optimisations: remove --no-cache from start.sh builds; always prune dangling images + build cache before build (not only below 5 GB); add hf_cache named volume to persist HF model weights across restarts; add .dockerignore files for all services; split Makefile up/build targets; add make prune target | opencode |
-| 2026-05-18 | Fix 502 errors on EC2: (1) change model_server docker-compose command from serve.py to local_gpu_serve.py; (2) delete old incomplete serve.py; (3) add requirements.worker-slim.txt and install it in backend Dockerfile so worker.tasks imports succeed; (4) add EXTERNAL_SITE_ORIGIN to .env.example and start.sh REQUIRED_VARS to fix CORS for production domain | opencode |
