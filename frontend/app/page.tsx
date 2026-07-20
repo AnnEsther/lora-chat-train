@@ -28,6 +28,7 @@ interface QAPair {
   answer: string;
   validated: boolean;
   edited: boolean;
+  source_document_name?: string | null;
 }
 
 interface Message {
@@ -713,6 +714,7 @@ export default function ChatPage() {
   const [session, setSession]           = useState<Session | null>(null);
   const [messages, setMessages]         = useState<Message[]>([]);
   const [input, setInput]               = useState("");
+  const [numQa, setNumQa]               = useState(5);
   const [loading, setLoading]           = useState(false);
   const [error, setError]               = useState<string | null>(null);
   const [health, setHealth]             = useState<ModelHealth | null>(null);
@@ -726,7 +728,9 @@ export default function ChatPage() {
   const [lastPoll, setLastPoll]         = useState<Date | null>(null);
   const [panelOpen, setPanelOpen]       = useState(true);
   const [startingTraining, setStartingTraining] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [uploadLoading, setUploadLoading]       = useState(false);
+  const bottomRef    = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const prevSessionStateRef = useRef<SessionState | null>(null);
 
   // ── Scroll to bottom ──
@@ -961,6 +965,110 @@ export default function ChatPage() {
     if (session) fetchQaCount(session.id);
   }, [session, fetchQaCount]);
 
+  // ── Upload document ──
+  const handleFileUpload = useCallback(async (file: File) => {
+    if (!session || uploadLoading) return;
+    if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state)) return;
+
+    setUploadLoading(true);
+    setError(null);
+
+    // Add a synthetic message entry to host the Q&A cards, labelled with the filename
+    const docMsgObj: Message = {
+      role: "user",
+      content: `[Document: ${file.name}]`,
+      synthLoading: true,
+    };
+    setMessages((prev) => [...prev, docMsgObj]);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("num_qa", String(numQa));
+
+      const resp = await fetch(`${API_URL}/sessions/${session.id}/upload`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!resp.ok || !resp.body) {
+        const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
+        throw new Error(errText || `HTTP ${resp.status}`);
+      }
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const raw = decoder.decode(value, { stream: true });
+        for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.type === "start") {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], segmentCount: event.segment_count ?? 1, qaPairs: [] };
+                return copy;
+              });
+            }
+
+            if (event.type === "qa_pair" && event.pair) {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                const existing = copy[lastIdx].qaPairs ?? [];
+                copy[lastIdx] = {
+                  ...copy[lastIdx],
+                  qaPairs: [...existing, event.pair as QAPair],
+                };
+                return copy;
+              });
+            }
+
+            if (event.type === "qa_count") {
+              setQaCount({
+                total_count: event.total,
+                validated_count: event.validated,
+                min_required: event.min_required,
+                ready_to_train: event.ready,
+              });
+            }
+
+            if (event.type === "end") {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], synthLoading: false };
+                return copy;
+              });
+            }
+
+            if (event.type === "error") {
+              setError(event.message ?? "Upload failed.");
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed.");
+      // Clear the loading indicator on the synthetic message
+      setMessages((prev) => {
+        const copy = [...prev];
+        const lastIdx = copy.length - 1;
+        copy[lastIdx] = { ...copy[lastIdx], synthLoading: false };
+        return copy;
+      });
+    } finally {
+      setUploadLoading(false);
+      // Reset the file input so the same file can be re-uploaded if needed
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }, [session, uploadLoading, numQa, fetchQaCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Send message ──
   const sendMessage = useCallback(async () => {
     if (!input.trim() || !session || loading) return;
@@ -981,7 +1089,7 @@ export default function ChatPage() {
         const resp = await fetch(`${API_URL}/sessions/${session.id}/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: userMsg }),
+          body: JSON.stringify({ message: userMsg, num_qa: numQa }),
         });
         if (resp.ok && resp.body) {
           const reader = resp.body.getReader();
@@ -1013,7 +1121,7 @@ export default function ChatPage() {
       const resp = await fetch(`${API_URL}/sessions/${session.id}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMsg }),
+        body: JSON.stringify({ message: userMsg, num_qa: numQa }),
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -1252,9 +1360,9 @@ export default function ChatPage() {
           <div className="max-w-3xl mx-auto w-full space-y-6">
             {messages.length === 0 && !error && (
               <div className="text-center text-gray-400 text-sm mt-16 space-y-2">
-                <p className="font-medium text-gray-500">Send a passage to generate training data</p>
-                <p className="text-xs">Each message you send will be used to generate Q&A pairs for fine-tuning.<br />
-                  When you have {MIN_TRAINING_SAMPLES}+ validated pairs, the <span className="font-medium text-green-700">Start Training</span> button will activate.</p>
+                <p className="font-medium text-gray-500">Send a passage or upload a document to generate training data</p>
+                <p className="text-xs">Paste text directly or use the paperclip button to upload a PDF, DOCX, TXT, or MD file.<br />
+                  Each source generates Q&A pairs for fine-tuning. When you have {MIN_TRAINING_SAMPLES}+ validated pairs, the <span className="font-medium text-green-700">Start Training</span> button will activate.</p>
                 <p className="text-xs text-gray-400 mt-3">Type <code className="bg-gray-100 px-1 rounded">/sleep</code> to immediately start training with all current Q&A pairs.</p>
               </div>
             )}
@@ -1266,13 +1374,22 @@ export default function ChatPage() {
                 return <div key={i} className="text-center text-sm text-gray-500 italic py-1">{msg.content}</div>;
               }
               if (msg.role === "user") {
+                const isDocUpload = msg.content.startsWith("[Document: ") && msg.content.endsWith("]");
+                const docName = isDocUpload ? msg.content.slice(11, -1) : null;
                 return (
                   <div key={i} className="space-y-2">
-                    {/* User bubble */}
+                    {/* User bubble — document uploads get a distinct pill style */}
                     <div className="flex justify-end">
-                      <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-br-sm text-sm leading-relaxed whitespace-pre-wrap bg-blue-600 text-white">
-                        {msg.content}
-                      </div>
+                      {isDocUpload ? (
+                        <div className="flex items-center gap-2 px-4 py-2.5 rounded-2xl rounded-br-sm bg-gray-100 border border-gray-300 text-gray-700 text-sm max-w-[80%]">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 flex-shrink-0 text-gray-500"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                          <span className="truncate font-medium">{docName}</span>
+                        </div>
+                      ) : (
+                        <div className="max-w-[80%] px-4 py-3 rounded-2xl rounded-br-sm text-sm leading-relaxed whitespace-pre-wrap bg-blue-600 text-white">
+                          {msg.content}
+                        </div>
+                      )}
                     </div>
 
                     {/* Inline QA deck */}
@@ -1295,7 +1412,9 @@ export default function ChatPage() {
                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
                           <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
                         </span>
-                        <span className="text-xs text-blue-500 font-medium">Analysing passage…</span>
+                        <span className="text-xs text-blue-500 font-medium">
+                          {isDocUpload ? "Extracting & analysing document…" : "Analysing passage…"}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -1317,7 +1436,30 @@ export default function ChatPage() {
 
         {/* Input */}
         <footer className="bg-white border-t border-gray-200 px-4 py-4 flex-shrink-0">
+          {/* Hidden file input — triggered by the paperclip button */}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.pdf,.docx"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleFileUpload(file);
+            }}
+          />
           <div className="max-w-3xl mx-auto flex gap-3 items-end">
+            {/* Paperclip upload button */}
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!isAcceptingInput || uploadLoading}
+              title={uploadLoading ? "Uploading…" : "Upload a document (PDF, DOCX, TXT, MD)"}
+              className="flex items-center justify-center w-11 h-11 rounded-xl border border-gray-300 bg-white hover:bg-gray-50 text-gray-500 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            >
+              {uploadLoading
+                ? <span className="animate-spin text-blue-500 text-base leading-none">⟳</span>
+                : <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              }
+            </button>
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1341,6 +1483,19 @@ export default function ChatPage() {
                 t.style.height = Math.min(t.scrollHeight, 192) + "px";
               }}
             />
+            <div className="flex flex-col items-center gap-0.5 shrink-0">
+              <label className="text-xs text-gray-400 leading-none">Q&amp;A</label>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={numQa}
+                onChange={(e) => setNumQa(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                disabled={!isAcceptingInput}
+                title="Number of Q&A pairs to generate"
+                className="w-14 rounded-lg border border-gray-300 px-2 py-2.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"
+              />
+            </div>
             <button
               onClick={sendMessage}
               disabled={!isAcceptingInput || !input.trim()}

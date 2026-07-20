@@ -20,7 +20,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -62,6 +62,9 @@ logger = logging.getLogger(__name__)
 
 MAX_SESSION_TOKENS: int = int(os.environ.get("MAX_SESSION_TOKENS", 4096))
 PRE_SLEEP_THRESHOLD: int = int(os.environ.get("PRE_SLEEP_THRESHOLD", 512))
+MAX_UPLOAD_BYTES: int = int(
+    os.environ.get("MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
+)  # 10 MB default
 
 
 @asynccontextmanager
@@ -252,7 +255,160 @@ async def chat(
 
     # Synthesize Q&A pairs from this passage and stream them back inline
     return StreamingResponse(
-        _synthesize_and_stream(session, user_turn, request.message, db),
+        _synthesize_and_stream(
+            session,
+            user_turn=user_turn,
+            passage=request.message,
+            db=db,
+            num_qa=request.num_qa,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Document text extraction ──────────────────────────────────────────────────
+
+
+def _extract_text_pdf(data: bytes) -> str:
+    """Extract plain text from PDF bytes using pypdf."""
+    import io
+
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    parts: list[str] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        if text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+def _extract_text_docx(data: bytes) -> str:
+    """Extract plain text from DOCX bytes using python-docx."""
+    import io
+
+    from docx import Document
+
+    doc = Document(io.BytesIO(data))
+    paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    return "\n\n".join(paragraphs)
+
+
+def _extract_text_from_upload(filename: str, data: bytes) -> str:
+    """
+    Dispatch to the correct extractor based on file extension.
+    Supports: .pdf, .docx, .txt, .md
+    Raises ValueError for unsupported types.
+    """
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext == "pdf":
+        return _extract_text_pdf(data)
+    if ext == "docx":
+        return _extract_text_docx(data)
+    if ext in ("txt", "md", ""):
+        return data.decode("utf-8", errors="replace")
+    raise ValueError(f"Unsupported file type: .{ext}")
+
+
+# ── Document upload endpoint ──────────────────────────────────────────────────
+
+
+@app.post("/sessions/{session_id}/upload")
+async def upload_document(
+    session_id: uuid.UUID,
+    file: UploadFile = File(...),
+    num_qa: int = Form(default=5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """
+    Accept a document upload (PDF, DOCX, TXT, MD), extract its text, then
+    synthesize Q&A pairs from it using the same SSE streaming pipeline as chat.
+
+    The Q&A pairs are stored in synthesized_qa with source_document_name set
+    to the original filename and source_turn_id = NULL (not a chat turn).
+
+    Form fields:
+        file    — the uploaded file (multipart)
+        num_qa  — number of Q&A pairs to generate (1–20, default 5)
+
+    SSE events (identical to /chat):
+        {"type": "start", "segment_count": N}
+        {"type": "heartbeat"}
+        {"type": "qa_pair", "pair": {...}}
+        {"type": "qa_count", ...}
+        {"type": "end"}
+        {"type": "error", "message": "..."}
+    """
+    session = await _get_active_session(session_id, db)
+
+    if session.state not in (
+        SessionState.ACTIVE,
+        SessionState.PRE_SLEEP_WARNING,
+        SessionState.INSUFFICIENT_DATA,
+        SessionState.FAILED,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is {session.state}, not accepting uploads.",
+        )
+
+    filename = file.filename or "document"
+
+    # Read with a size cap to prevent OOM on huge uploads
+    raw_data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw_data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum upload size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+
+    # Run blocking PDF/DOCX parsing off the async event loop
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    try:
+        text = await loop.run_in_executor(
+            None, _extract_text_from_upload, filename, raw_data
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except Exception as exc:
+        logger.error(
+            "document_extraction_failed",
+            extra={"filename": filename, "error": str(exc)},
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=422, detail=f"Could not extract text from document: {exc}"
+        )
+
+    if not text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Document appears to be empty or has no extractable text.",
+        )
+
+    logger.info(
+        "document_uploaded",
+        extra={
+            "session_id": str(session_id),
+            "filename": filename,
+            "text_length": len(text),
+            "num_qa": num_qa,
+        },
+    )
+
+    return StreamingResponse(
+        _synthesize_and_stream(
+            session,
+            user_turn=None,
+            passage=text,
+            db=db,
+            num_qa=num_qa,
+            source_document_name=filename,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -260,18 +416,29 @@ async def chat(
 
 async def _synthesize_and_stream(
     session: ChatSession,
-    user_turn: Turn,
+    user_turn: Optional[Turn],
     passage: str,
     db: AsyncSession,
+    num_qa: int = 5,
+    source_document_name: Optional[str] = None,
 ):
     """
-    Synthesize Q&A pairs from the user's passage one-by-one, persisting and
-    streaming each pair immediately as it is generated so the user sees cards
-    appear progressively rather than waiting for all pairs at once.
+    Synthesize Q&A pairs from a passage one-by-one, persisting and streaming
+    each pair immediately as it is generated.
+
+    Called from two paths:
+      - Chat (/sessions/{id}/chat): user_turn is set, source_document_name is None.
+      - Document upload (/sessions/{id}/upload): user_turn is None,
+        source_document_name holds the original filename.
+
+    Args:
+        user_turn: The Turn ORM object for chat messages, or None for uploads.
+        num_qa: Maximum number of Q&A pairs (segments) to generate. Defaults to 5.
+        source_document_name: Original filename when sourced from an upload.
 
     SSE events emitted:
       {"type": "start", "segment_count": N}   — how many segments will be processed
-      {"type": "heartbeat"}                   — emitted every ~5s while model is thinking
+      {"type": "heartbeat"}                   — keep-alive between model calls
       {"type": "qa_pair", "pair": {...}}      — one pair, streamed as soon as it is ready
       {"type": "qa_count", ...}               — updated totals after all pairs are done
       {"type": "end"}
@@ -284,7 +451,7 @@ async def _synthesize_and_stream(
 
     try:
         # Split passage into segments upfront so we can tell the frontend how many to expect
-        segments = _split_passage(passage.strip(), max_parts=5)
+        segments = _split_passage(passage.strip(), max_parts=num_qa)
         yield f"data: {json.dumps({'type': 'start', 'segment_count': len(segments)})}\n\n"
 
         for i, segment in enumerate(segments):
@@ -327,7 +494,8 @@ async def _synthesize_and_stream(
             qa = SynthesizedQA(
                 id=uuid.uuid4(),
                 session_id=session.id,
-                source_turn_id=user_turn.id,
+                source_turn_id=user_turn.id if user_turn is not None else None,
+                source_document_name=source_document_name,
                 question=pair_dict["question"],
                 answer=pair_dict["answer"],
                 validated=False,
@@ -338,7 +506,7 @@ async def _synthesize_and_stream(
             await db.refresh(qa)
 
             # Stream the pair immediately — card appears in the chat window now
-            yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False}})}\n\n"
+            yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False, 'source_document_name': source_document_name}})}\n\n"
 
             logger.info(
                 "pair_streamed",

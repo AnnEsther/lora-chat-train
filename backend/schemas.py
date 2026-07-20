@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Session schemas ───────────────────────────────────────────────────────────
@@ -42,6 +42,12 @@ class CreateSessionRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    num_qa: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of Q&A pairs to generate from this passage (1–20).",
+    )
 
 
 # ── Training run schemas ──────────────────────────────────────────────────────

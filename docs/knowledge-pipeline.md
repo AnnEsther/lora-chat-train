@@ -83,6 +83,42 @@ Scores on 4 dimensions:
 - "Validate All & Start Training" — calls `POST /sessions/{id}/qa/validate-mark` then `POST /sessions/{id}/start-training`
 - Shows `validation_notes` labelled as "Automated validator notes" on each card
 
+## Document Upload
+
+Users can upload a document instead of (or in addition to) typing passages. The upload button (paperclip icon) sits to the left of the chat textarea in the footer.
+
+### Supported formats
+| Extension | Extraction method |
+|-----------|------------------|
+| `.pdf`    | `pypdf` — page-by-page text extraction |
+| `.docx`   | `python-docx` — paragraph text extraction |
+| `.txt`    | UTF-8 decode |
+| `.md`     | UTF-8 decode |
+
+### Flow
+1. User clicks the paperclip button → native file picker opens (filtered to `.txt,.md,.pdf,.docx`)
+2. File is immediately `POST`ed to `/sessions/{id}/upload` as `multipart/form-data` with the current `num_qa` value
+3. Backend extracts text → feeds it into `_synthesize_and_stream` (the same SSE generator used by `/chat`)
+4. Q&A cards stream back and appear below a document pill bubble (filename shown, not raw text)
+5. `source_document_name` is stored on every resulting `SynthesizedQA` row for traceability
+
+### Upload endpoint
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/sessions/{id}/upload` | Upload a document; streams SSE Q&A pairs (same events as `/chat`) |
+
+**Form fields:**
+- `file` — the uploaded file (multipart)
+- `num_qa` — number of Q&A pairs to generate (int, 1–20, default 5; uses the existing footer spinner)
+
+**Error responses:**
+- `415 Unsupported Media Type` — file extension not in allowed list
+- `422 Unprocessable Entity` — document is empty or text could not be extracted
+- `409 Conflict` — session is not in an accepting state
+
+### Database
+`source_document_name TEXT` (nullable) was added to `synthesized_qa`. Chat-sourced pairs have `NULL`; document-sourced pairs have the original filename. Run `ALTER TABLE synthesized_qa ADD COLUMN IF NOT EXISTS source_document_name TEXT;` to migrate existing databases.
+
 ## API Endpoints (QA Review)
 | Method | Path | Description |
 |--------|------|-------------|
@@ -100,3 +136,4 @@ Scores on 4 dimensions:
 | 2026-05-08 | Fix ExtractedTopic fields (subtopics + keywords + intent, no confidence); fix topic domains (business→finance); fix KnowledgeRecord fact types (5 types, not 6; no definition type); add source_type to KnowledgeRecord | opencode |
 | 2026-04-28 | Initial documentation created | opencode |
 | 2026-05-05 | Update KnowledgeRecord output to match corrected model (topic, facts list[dict]) | opencode |
+| 2026-07-20 | Add Document Upload section — POST /sessions/{id}/upload endpoint, text extraction (PDF/DOCX/TXT/MD), source_document_name DB column, frontend paperclip button | opencode |

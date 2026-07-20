@@ -353,10 +353,10 @@ def _split_passage(passage: str, max_parts: int) -> list[str]:
         return sentences
 
     # More sentences than max_parts — merge into roughly equal chunks
-    chunk_size = len(sentences) // max_parts
+    chunk_size = max(1, len(sentences) // max_parts)
     chunks = []
-    for i in range(0, len(sentences), max_parts):
-        chunk = " ".join(sentences[i : i + max_parts])
+    for i in range(0, len(sentences), chunk_size):
+        chunk = " ".join(sentences[i : i + chunk_size])
         if chunk:
             chunks.append(chunk)
     return chunks[:max_parts]

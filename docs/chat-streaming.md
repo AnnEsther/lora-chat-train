@@ -62,6 +62,17 @@ The `/sleep` command still works and now goes directly to Phase 2 training (skip
 - `count_messages(messages)` — sums `count(content) + 4` overhead per message
 - Intentionally approximate — accuracy matters less than reliable threshold detection
 
+## Chat Request Payload
+
+`POST /sessions/{session_id}/chat` accepts:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `message` | `string` | yes | — | The user's passage text (or `/sleep`) |
+| `num_qa` | `integer` | no | `5` | Number of Q&A pairs to generate (1–20) |
+
+The `num_qa` value is passed as `max_parts` to `_split_passage()`, which splits the passage into at most that many segments. One Q&A pair is synthesised per segment, so the final number of pairs equals `min(num_qa, natural_segment_count)`.
+
 ## Configuration
 | Env Var | Default | Description |
 |---------|---------|-------------|
@@ -90,6 +101,7 @@ QA pairs appear **inline below the user bubble** as an `InlineDeck` component �
 <!-- Agents: append an entry here after every change -->
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-07-10 | Add `num_qa` field to `ChatRequest` (default 5, range 1–20); pass through `_synthesize_and_stream`; replace hardcoded `max_parts=5`; add Q&A count number input in frontend footer | opencode |
 | 2026-05-20 | Update frontend SSE handling table to reflect InlineDeck (not modal); qa_pair events populate InlineDeck cards progressively; no modal-open trigger on SSE events | opencode |
 | 2026-05-18 | Complete redesign of chat flow: every message now synthesises Q&A pairs inline instead of streaming an LLM reply. New SSE events: qa_pairs, qa_count. _force_sleep now routes to Phase 2 directly if inline QA exists. | opencode |
 | 2026-04-29 | FAILED sessions no longer freeze chat — input stays active; INSUFFICIENT_DATA transition injects system message | opencode |
