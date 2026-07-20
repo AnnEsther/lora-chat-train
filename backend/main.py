@@ -356,8 +356,8 @@ async def upload_document(
 
     filename = file.filename or "document"
 
-    # Read with a size cap to prevent OOM on huge uploads
-    raw_data = await file.read(MAX_UPLOAD_BYTES + 1)
+    # Read full file then enforce size cap
+    raw_data = await file.read()
     if len(raw_data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
