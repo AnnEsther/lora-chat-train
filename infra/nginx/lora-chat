@@ -31,6 +31,7 @@ server {
         proxy_buffering off;        # required for SSE
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
+        client_max_body_size 15m;   # allow document uploads up to 10 MB (with headroom)
 
 	add_header 'Access-Control-Allow-Origin' $http_origin always;
 	add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
