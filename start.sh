@@ -45,6 +45,10 @@ if [[ "${1:-}" == "--setup" ]]; then
   SETUP_MODE=true
 fi
 
+# Flag set in Section 3.5 when the user switches models.
+# Acted on in Section 6 AFTER docker compose down releases the volume.
+HF_CACHE_SHOULD_CLEAR=false
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
@@ -293,14 +297,11 @@ else
     fi
     ok "Model updated: ${NEW_MODEL}"
 
-    # Wipe cached weights for the old model — they are no longer needed and
-    # a 7B model consumes ~14 GB. The new model will download automatically
-    # when the model_server container first starts.
-    if docker volume inspect lora-chat-train_hf_cache &>/dev/null; then
-      info "Clearing cached model weights for old model (${CURRENT_MODEL})..."
-      docker volume rm lora-chat-train_hf_cache
-      ok "hf_cache cleared — ${NEW_MODEL} weights will download on first start (~10–20 min)"
-    fi
+    # Schedule hf_cache wipe — cannot remove the volume here because containers
+    # may still be running and holding it open. The actual rm happens in Section 6
+    # after docker compose down has released all volume mounts.
+    HF_CACHE_SHOULD_CLEAR=true
+    info "Old model weights (${CURRENT_MODEL}) will be cleared before rebuild (~14 GB freed)"
   elif [[ -n "$NEW_MODEL" ]]; then
     ok "Selected model is already active: ${CURRENT_MODEL}"
   fi
@@ -410,6 +411,14 @@ header "Starting Docker services"
 if docker compose ps --quiet 2>/dev/null | grep -q .; then
   info "Stopping existing containers..."
   docker compose down --remove-orphans
+fi
+
+# Clear hf_cache now that containers are stopped and the volume is no longer mounted.
+# This runs only when the user switched models in Section 3.5.
+if [ "$HF_CACHE_SHOULD_CLEAR" = "true" ]; then
+  info "Clearing cached model weights for old model..."
+  docker volume rm lora-chat-train_hf_cache 2>/dev/null || true
+  ok "hf_cache cleared — new model weights will download on first start (~10–20 min)"
 fi
 
 info "Building and starting all services..."
