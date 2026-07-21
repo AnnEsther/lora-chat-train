@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
+# How to fix it
+# Step 1 — Check how much space you have:
+# df -h /var/lib/containerd
+# df -h /var/lib/docker   # if using Docker daemon instead of containerd
+# df -h /                 # overall root partition
+# Step 2 — Free up Docker/containerd cache:
+# Remove unused images, containers, volumes, build cache
+# docker system prune -af --volumes
+# Check how much build cache specifically is taking up
+# docker system df
+# Step 3 — If still not enough, remove old images manually:
+# List all images sorted by size
+# docker images --format "{{.Size}}\t{{.Repository}}:{{.Tag}}" | sort -rh | head -20
+# Remove specific old/unused ones
+# docker rmi <image_id>
+# Step 4 — Retry the build:
+# bash start.sh
+
 # start.sh — LoRA Chat & Train
 # Idempotent setup + deploy script. Safe to run on a fresh EC2 or for updates.
 # Usage:
@@ -274,9 +292,15 @@ else
       echo "HF_ENDPOINT_MODEL=${NEW_MODEL}" >> "$REPO_DIR/.env"
     fi
     ok "Model updated: ${NEW_MODEL}"
-    info ".env written. The new model will be downloaded on next container start."
-    info "To switch a running stack without full redeploy:"
-    info "  docker compose restart model_server"
+
+    # Wipe cached weights for the old model — they are no longer needed and
+    # a 7B model consumes ~14 GB. The new model will download automatically
+    # when the model_server container first starts.
+    if docker volume inspect lora-chat-train_hf_cache &>/dev/null; then
+      info "Clearing cached model weights for old model (${CURRENT_MODEL})..."
+      docker volume rm lora-chat-train_hf_cache
+      ok "hf_cache cleared — ${NEW_MODEL} weights will download on first start (~10–20 min)"
+    fi
   elif [[ -n "$NEW_MODEL" ]]; then
     ok "Selected model is already active: ${CURRENT_MODEL}"
   fi
@@ -346,24 +370,35 @@ DISK_FREE=$(df / | awk 'NR==2 {print $4}')
 DISK_FREE_GB=$(( DISK_FREE / 1024 / 1024 ))
 info "Free disk space before cleanup: ${DISK_FREE_GB}GB"
 
-# Always prune dangling images and stale build cache — safe because dangling
-# images are by definition not referenced by any container or tag.
-info "Pruning dangling Docker images and stale build cache..."
-docker image prune -f
-docker builder prune -f
+# Remove ALL unused images (not just dangling) and all stale build cache.
+# This reclaims the previous lora-chat-train-model_server / worker image layers
+# (~8–15 GB) that accumulate across rebuilds.
+info "Pruning all unused Docker images and build cache..."
+docker image prune -af
+docker builder prune -af
 
 DISK_FREE_AFTER=$(df / | awk 'NR==2 {print $4}')
 DISK_FREE_AFTER_GB=$(( DISK_FREE_AFTER / 1024 / 1024 ))
 ok "Disk space after cleanup: ${DISK_FREE_AFTER_GB}GB free"
 
-# If still critically low, do a full system prune (removes stopped containers
-# and unused networks too — does NOT remove named volumes).
-if [ "$DISK_FREE_AFTER_GB" -lt 5 ]; then
-  warn "Still low on disk (${DISK_FREE_AFTER_GB}GB) — running full system prune..."
-  docker system prune -f
+# The model_server image requires ~20 GB free to build and unpack.
+# If we are still below that threshold, escalate: full system prune first,
+# then wipe hf_cache (model re-downloads automatically on next start).
+if [ "$DISK_FREE_AFTER_GB" -lt 20 ]; then
+  warn "Less than 20GB free (${DISK_FREE_AFTER_GB}GB) — running full system prune..."
+  docker system prune -af
   DISK_FREE_FINAL=$(df / | awk 'NR==2 {print $4}')
   DISK_FREE_FINAL_GB=$(( DISK_FREE_FINAL / 1024 / 1024 ))
   ok "Disk space after full prune: ${DISK_FREE_FINAL_GB}GB free"
+
+  if [ "$DISK_FREE_FINAL_GB" -lt 20 ]; then
+    warn "Still only ${DISK_FREE_FINAL_GB}GB free — clearing hf_cache volume..."
+    warn "Model weights will re-download on first start (~10–20 min depending on network)"
+    docker volume rm lora-chat-train_hf_cache 2>/dev/null || true
+    DISK_FREE_FINAL=$(df / | awk 'NR==2 {print $4}')
+    DISK_FREE_FINAL_GB=$(( DISK_FREE_FINAL / 1024 / 1024 ))
+    ok "Disk space after hf_cache clear: ${DISK_FREE_FINAL_GB}GB free"
+  fi
 fi
 
 # =============================================================================
@@ -380,6 +415,23 @@ fi
 info "Building and starting all services..."
 docker compose build backend
 docker compose build worker
+
+# Hard disk guard — the model_server image (CUDA + PyTorch + ML libs) requires
+# ~20 GB to build and unpack. Fail fast here rather than after 400 seconds.
+DISK_PRE_MODEL=$(df / | awk 'NR==2 {print $4}')
+DISK_PRE_MODEL_GB=$(( DISK_PRE_MODEL / 1024 / 1024 ))
+if [ "$DISK_PRE_MODEL_GB" -lt 20 ]; then
+  warn "Only ${DISK_PRE_MODEL_GB}GB free before model_server build — need at least 20GB"
+  warn "Clearing hf_cache volume to recover space (model weights will re-download)..."
+  docker volume rm lora-chat-train_hf_cache 2>/dev/null || true
+  DISK_POST_CLEAR=$(df / | awk 'NR==2 {print $4}')
+  DISK_POST_CLEAR_GB=$(( DISK_POST_CLEAR / 1024 / 1024 ))
+  ok "Disk after hf_cache clear: ${DISK_POST_CLEAR_GB}GB free"
+  if [ "$DISK_POST_CLEAR_GB" -lt 20 ]; then
+    fail "Still only ${DISK_POST_CLEAR_GB}GB free after cleanup — cannot safely build model_server.\nExpand your root volume to at least 150GB in the AWS Console, then re-run ./start.sh"
+  fi
+fi
+
 docker compose build model_server
 docker compose build frontend
 docker compose build glyph_chat
