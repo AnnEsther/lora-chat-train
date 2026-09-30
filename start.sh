@@ -484,14 +484,14 @@ wait_for "frontend"     "http://localhost:3000"        20 3
 # =============================================================================
 header "Database initialisation"
 
+# Always re-apply: schema.sql is idempotent (IF NOT EXISTS everywhere), so this
+# creates missing tables on a fresh DB and adds new columns to an existing one.
 info "Applying schema (safe to re-run)..."
-if docker compose exec -T postgres psql -U lora -d lora -c "\dt" 2>/dev/null \
-    | grep -q "sessions"; then
-  ok "Database schema already applied"
-else
-  docker compose exec -T postgres psql -U lora -d lora \
-    -f /docker-entrypoint-initdb.d/01_schema.sql 2>/dev/null || true
+if docker compose exec -T postgres psql -U lora -d lora -q -v ON_ERROR_STOP=1 \
+    -f /docker-entrypoint-initdb.d/01_schema.sql; then
   ok "Schema applied"
+else
+  warn "Schema apply failed — check: docker compose logs postgres"
 fi
 
 # =============================================================================
