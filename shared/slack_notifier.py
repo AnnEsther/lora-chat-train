@@ -382,3 +382,41 @@ def insufficient_data_warning(session_id: str, kept: int, required: int) -> None
             extra={"kept": kept, "required": required},
         )
     )
+
+
+def backend_error(
+    where: str, error: str, error_id: str, session_id: str | None = None
+) -> None:
+    send(
+        SlackEvent(
+            stage="backend_error",
+            status="error",
+            summary=f"Unhandled error in `{where}`: {error[:500]}",
+            session_id=session_id,
+            extra={
+                "error_id": error_id,
+                "logs": f"docker compose logs backend | grep -A40 {error_id}",
+            },
+        )
+    )
+
+
+def passage_processed(
+    session_id: str, source: str, requested: int, generated: int, failures: int
+) -> None:
+    status = "ok" if generated >= requested else "warn"
+    if generated == 0:
+        status = "error"
+    send(
+        SlackEvent(
+            stage="qa_generated",
+            status=status,
+            summary=f"{source}: generated {generated}/{requested} Q&A pairs.",
+            session_id=session_id,
+            extra={
+                "requested": requested,
+                "generated": generated,
+                "failed_model_calls": failures,
+            },
+        )
+    )

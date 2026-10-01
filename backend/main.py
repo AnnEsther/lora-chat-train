@@ -22,7 +22,8 @@ from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi import Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -39,6 +40,8 @@ from model_client import ModelClient
 import token_counter
 from worker.tasks import enqueue_training_pipeline
 from shared.slack_notifier import (
+    backend_error,
+    passage_processed,
     session_started,
     pre_sleep_warning,
     session_sleeping,
@@ -89,6 +92,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _notify_in_background(fn, *args) -> None:
+    """Send a Slack notification without blocking the event loop (send() retries with sleeps)."""
+    import asyncio
+
+    try:
+        asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    except RuntimeError:
+        fn(*args)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error(request: Request, exc: Exception) -> JSONResponse:
+    """Log the traceback with a short error id, alert Slack, and tell the client
+    what failed instead of a bare "Internal Server Error"."""
+    error_id = uuid.uuid4().hex[:8]
+    where = f"{request.method} {request.url.path}"
+    error = f"{type(exc).__name__}: {exc}"[:300]
+    # The id is in the message itself so `grep <id>` finds the traceback
+    logger.error(f"unhandled_error id={error_id} {where} — {error}", exc_info=exc)
+    session_id = request.path_params.get("session_id")
+    _notify_in_background(
+        backend_error, where, error, error_id, str(session_id) if session_id else None
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{error} (error id {error_id})", "error_id": error_id},
+    )
 
 
 # ── Session endpoints ─────────────────────────────────────────────────────────
@@ -474,6 +506,10 @@ async def _synthesize_and_stream(
         allocation = allocate_pairs(len(chunks), num_qa)
         yield f"data: {json.dumps({'type': 'start', 'segment_count': num_qa})}\n\n"
 
+        source = f"Document {source_document_name}" if source_document_name else "Chat passage"
+        generated = 0
+        failures: list[str] = []
+
         for i, (chunk, wanted) in enumerate(zip(chunks, allocation)):
             asked: list[str] = []
             # A call may return fewer pairs than asked (dropped as ungrounded or
@@ -492,13 +528,10 @@ async def _synthesize_and_stream(
                     )
                 except Exception as exc:
                     logger.warning(
-                        "chunk_synthesis_failed",
-                        extra={
-                            "chunk": i,
-                            "error": str(exc),
-                            "session_id": str(session.id),
-                        },
+                        f"chunk_synthesis_failed chunk={i}: {type(exc).__name__}: {exc}",
+                        extra={"session_id": str(session.id)},
                     )
+                    failures.append(f"{type(exc).__name__}: {exc}")
                     pairs = []
 
                 # Heartbeat keeps the SSE connection alive between model calls
@@ -506,6 +539,7 @@ async def _synthesize_and_stream(
 
                 for pair_dict in pairs:
                     asked.append(pair_dict["question"])
+                    generated += 1
 
                     # Persist immediately
                     qa = SynthesizedQA(
@@ -540,6 +574,17 @@ async def _synthesize_and_stream(
                     extra={"chunk": i, "wanted": wanted, "got": len(asked)},
                 )
 
+        _notify_in_background(
+            passage_processed, str(session.id), source, num_qa, generated, len(failures)
+        )
+        if generated == 0:
+            reason = (
+                f"model calls failed — {failures[0]}"
+                if failures
+                else "the model produced no usable pairs (all were unparseable or not supported by the text)"
+            )
+            yield f"data: {json.dumps({'type': 'error', 'message': f'No Q&A pairs generated: {reason}'})}\n\n"
+
         # Final count update
         total_result = await db.execute(
             sa_select(func.count())
@@ -559,12 +604,18 @@ async def _synthesize_and_stream(
         yield f"data: {json.dumps({'type': 'qa_count', 'total': total_count, 'validated': validated_count, 'min_required': MIN_TRAINING_SAMPLES, 'ready': validated_count >= MIN_TRAINING_SAMPLES})}\n\n"
 
     except Exception as exc:
+        error_id = uuid.uuid4().hex[:8]
+        error = f"{type(exc).__name__}: {exc}"[:300]
         logger.error(
-            "synthesis_stream_error",
-            extra={"error": str(exc), "session_id": str(session.id)},
+            f"synthesis_stream_error id={error_id} — {error}",
+            extra={"session_id": str(session.id)},
             exc_info=True,
         )
-        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        where = "upload" if source_document_name else "chat passage"
+        _notify_in_background(
+            backend_error, f"Q&A generation ({where})", error, error_id, str(session.id)
+        )
+        yield f"data: {json.dumps({'type': 'error', 'message': f'{error} (error id {error_id})'})}\n\n"
 
     finally:
         yield 'data: {"type":"end"}\n\n'

@@ -709,6 +709,16 @@ function InlineDeck({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
+/** Turn a failed response into a readable message (backend JSON detail, else status text). */
+async function describeHttpError(resp: Response): Promise<string> {
+  const text = await resp.text().catch(() => "");
+  try {
+    const detail = JSON.parse(text).detail;
+    if (detail) return `HTTP ${resp.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`;
+  } catch {}
+  return `HTTP ${resp.status}: ${text.slice(0, 200) || resp.statusText}`;
+}
+
 export default function ChatPage() {
   const [sessions, setSessions]         = useState<Session[]>([]);
   const [session, setSession]           = useState<Session | null>(null);
@@ -723,7 +733,6 @@ export default function ChatPage() {
   const [outputFiles, setOutputFiles]   = useState<OutputFile[]>([]);
   const [adapters, setAdapters]         = useState<Adapter[]>([{ id: "base", version: "Base model", path: "", is_base: true, trained_at: null }]);
   const [selectedAdapter, setSelectedAdapter] = useState<string>("base");
-  const [trainingSystemPrompt, setTrainingSystemPrompt] = useState<string>("");
   const [systemPrompt, setSystemPrompt] = useState<string>("");
   const [lastPoll, setLastPoll]         = useState<Date | null>(null);
   const [panelOpen, setPanelOpen]       = useState(true);
@@ -923,7 +932,6 @@ export default function ChatPage() {
       const body: Record<string, string> = {};
       if (adapterId) body.adapter_id = adapterId;
       if (systemPrompt) body.system_prompt = systemPrompt;
-      if (trainingSystemPrompt) body.training_system_prompt = trainingSystemPrompt;
       const resp = await fetch(`${API_URL}/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -939,7 +947,7 @@ export default function ChatPage() {
     } catch {
       setError("Could not create session. Is the backend running?");
     }
-  }, [systemPrompt, trainingSystemPrompt, fetchSessions]);
+  }, [systemPrompt, fetchSessions]);
 
   // ── Update a QA pair in local message state ──
   const handleQAUpdate = useCallback((turnId: string | undefined, qaId: string, updates: Partial<QAPair>) => {
@@ -1000,18 +1008,21 @@ export default function ChatPage() {
       });
 
       if (!resp.ok || !resp.body) {
-        const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
-        throw new Error(errText || `HTTP ${resp.status}`);
+        throw new Error(`Upload failed — ${await describeHttpError(resp)}`);
       }
 
       const reader  = resp.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const raw = decoder.decode(value, { stream: true });
-        for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
+        // Network chunks can split an event mid-line; keep the partial tail for the next read
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines.filter((l) => l.startsWith("data: "))) {
           try {
             const event = JSON.parse(line.slice(6));
 
@@ -1131,16 +1142,20 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMsg, num_qa: numQa }),
       });
-      if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok || !resp.body) throw new Error(`Request failed — ${await describeHttpError(resp)}`);
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const raw = decoder.decode(value, { stream: true });
-        for (const line of raw.split("\n").filter((l) => l.startsWith("data: "))) {
+        // Network chunks can split an event mid-line; keep the partial tail for the next read
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines.filter((l) => l.startsWith("data: "))) {
           try {
             const event = JSON.parse(line.slice(6));
 
@@ -1211,8 +1226,8 @@ export default function ChatPage() {
           } catch {}
         }
       }
-    } catch {
-      setError("Request failed — check backend connection.");
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : "Request failed — check backend connection.");
       setMessages((prev) => {
         const copy = [...prev];
         if (copy.length > 0) copy[copy.length - 1] = { ...copy[copy.length - 1], synthLoading: false };
@@ -1343,10 +1358,8 @@ export default function ChatPage() {
                 New session ▾
               </button>
               <div id="new-session-dd" className="hidden absolute right-0 top-full mt-1 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-3 space-y-2">
-                <div className="text-xs text-gray-500 font-medium">Chat system prompt (optional)</div>
-                <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} placeholder="You are a helpful AI assistant..." className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none" rows={2} />
-                <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Training system prompt (optional)</div>
-                <textarea value={trainingSystemPrompt} onChange={(e) => setTrainingSystemPrompt(e.target.value)} placeholder="Prompt used when training the model..." className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none" rows={2} />
+                <div className="text-xs text-gray-500 font-medium">System prompt (persona)</div>
+                <textarea value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} placeholder="You are an ancient Glyph..." title="Used in every training example and by Glyph Chat for adapters trained in this session. Changing it requires retraining." className="w-full text-xs px-2 py-1.5 rounded border border-gray-200 text-gray-700 resize-none" rows={4} />
                 <div className="text-xs text-gray-500 font-medium border-t border-gray-100 pt-2">Select adapter</div>
                 <button onClick={() => { createSession("base"); document.getElementById("new-session-dd")?.classList.add("hidden"); }} className="w-full text-left px-2 py-1.5 text-xs hover:bg-gray-50 text-gray-700 rounded">Base model</button>
                 {adapters.filter(a => a.id !== "base").map((a) => (
