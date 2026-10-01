@@ -413,7 +413,7 @@ async def upload_document(
     except Exception as exc:
         logger.error(
             "document_extraction_failed",
-            extra={"filename": filename, "error": str(exc)},
+            extra={"document": filename, "error": str(exc)},
             exc_info=True,
         )
         raise HTTPException(
@@ -444,7 +444,7 @@ async def upload_document(
         "document_uploaded",
         extra={
             "session_id": str(session_id),
-            "filename": filename,
+            "document": filename,
             "text_length": len(text),
             "num_qa": num_qa,
         },
