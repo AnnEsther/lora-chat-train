@@ -242,6 +242,26 @@ def _completion_only_collator(tokenizer):
     return DataCollatorForCompletionOnlyLM(response_template=marker_ids, tokenizer=tokenizer)
 
 
+def free_gpu_memory() -> None:
+    """Release unreferenced GPU memory held by PyTorch's caching allocator.
+
+    Freed tensors stay reserved by this process until empty_cache(); other model
+    loads (which size device_map from the driver's free memory) can't see it.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free, total = torch.cuda.mem_get_info()
+            logger.info(f"gpu_memory_freed free={free / 1024**3:.1f}GB of {total / 1024**3:.1f}GB")
+    except ImportError:
+        pass
+
+
 def _progress_callback(progress_cb, min_interval: float = 10.0):
     """TrainerCallback reporting step, loss, epoch and ETA via progress_cb(**fields).
 
@@ -419,12 +439,20 @@ def train_local(config: dict, dataset_path: str | Path = "", progress_cb=None) -
         callbacks=[_progress_callback(progress_cb)] if progress_cb else None,
     )
 
-    trainer.train()
+    try:
+        trainer.train()
 
-    # ── Save adapter ──────────────────────────────────────────────────────────
-    logger.info("saving_adapter", extra={"output_dir": str(output_dir)})
-    trainer.model.save_pretrained(str(output_dir))
-    tokenizer.save_pretrained(str(output_dir))
+        # ── Save adapter ──────────────────────────────────────────────────────
+        logger.info("saving_adapter", extra={"output_dir": str(output_dir)})
+        trainer.model.save_pretrained(str(output_dir))
+        tokenizer.save_pretrained(str(output_dir))
+    finally:
+        # Evaluation runs next in this same worker process. Drop the training
+        # model and return cached GPU memory to the driver, otherwise the
+        # evaluator's device_map="auto" sees too little free VRAM and fails with
+        # "Some modules are dispatched on the CPU or the disk".
+        del trainer, model
+        free_gpu_memory()
 
     if not output_dir.exists():
         raise RuntimeError(f"Training completed but output_dir missing: {output_dir}")

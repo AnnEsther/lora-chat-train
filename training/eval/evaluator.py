@@ -132,12 +132,21 @@ class Evaluator:
         start = time.time()
         logger.info("eval_start", extra={"run_id": run_id, "adapter_dir": adapter_dir})
 
+        from training.trainer.hf_launcher import free_gpu_memory
+
+        free_gpu_memory()  # anything training left cached in this worker process
         model = self._load_model(adapter_dir)
         results: list[EvalResult] = []
         total_weight = sum(c.weight for c in self.eval_cases)
 
-        for case in self.eval_cases:
-            response = self._infer(model, case.prompt)
+        try:
+            responses = [self._infer(model, case.prompt) for case in self.eval_cases]
+        finally:
+            # Deploy runs next in this process; give the GPU back
+            del model
+            free_gpu_memory()
+
+        for case, response in zip(self.eval_cases, responses):
             raw_score = case.scorer(response) if case.scorer else 0.5
             weighted = raw_score * case.weight
 
