@@ -1166,16 +1166,41 @@ async def list_adapters_public() -> dict:
     }
 
 
+async def _adapter_system_prompt(run_id: Optional[str], db: AsyncSession) -> Optional[str]:
+    """System prompt of the session that trained this adapter (what it was trained with)."""
+    if not run_id:
+        return None
+    from sqlalchemy import select
+    from models import TrainingRun
+
+    try:
+        result = await db.execute(
+            select(ChatSession.system_prompt)
+            .join(TrainingRun, TrainingRun.session_id == ChatSession.id)
+            .where(TrainingRun.id == uuid.UUID(run_id))
+        )
+        return result.scalar_one_or_none()
+    except Exception as exc:
+        logger.warning("adapter_system_prompt_lookup_failed", extra={"error": str(exc)})
+        return None
+
+
 @app.post("/chat/direct", dependencies=[Depends(_verify_api_key)])
-async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
+async def direct_chat(
+    request: DirectChatRequest, db: AsyncSession = Depends(get_db)
+) -> StreamingResponse:
     """
     Stateless streaming chat for Glyph Chat.
     No session created, no token budget, no training trigger.
+
+    The system prompt matches the one the adapter was trained with (its session's
+    system_prompt), falling back to GLYPH_SYSTEM_PROMPT, then the client default.
     """
     # Load or unload the adapter based on the requested adapter_id
     import requests as req
 
     model_url = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
+    adapter_run_id: Optional[str] = None
 
     if request.adapter_id and request.adapter_id != "base":
         # Load the requested LoRA adapter
@@ -1187,6 +1212,7 @@ async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
                     (a for a in adapters if a["id"] == request.adapter_id), None
                 )
                 if selected and selected.get("path"):
+                    adapter_run_id = selected.get("run_id")
                     req.post(
                         f"{model_url}/reload_adapter",
                         json={"adapter_dir": selected["path"]},
@@ -1205,12 +1231,16 @@ async def direct_chat(request: DirectChatRequest) -> StreamingResponse:
         except Exception as exc:
             logger.warning("direct_chat_base_unload_failed", extra={"error": str(exc)})
 
+    system_prompt = await _adapter_system_prompt(adapter_run_id, db) or os.environ.get(
+        "GLYPH_SYSTEM_PROMPT"
+    )
+
     messages = request.history + [{"role": "user", "content": request.message}]
     model_client: ModelClient = app.state.model_client
 
     async def stream_gen():
         try:
-            async for chunk in model_client.stream(messages):
+            async for chunk in model_client.stream(messages, system_prompt=system_prompt):
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
         except Exception as exc:
             logger.error("direct_chat_stream_error", extra={"error": str(exc)})

@@ -376,7 +376,12 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
 
         session = db.get(ChatSession, uuid.UUID(session_id))
         if session:
-            training_system_prompt = session.training_system_prompt
+            # The assistant turns in the dataset are the answerer's (e.g. the Glyph),
+            # so train with the chat persona (system_prompt). training_system_prompt
+            # is the questioner persona used to synthesize Q&A, not to answer it.
+            training_system_prompt = (
+                session.system_prompt or session.training_system_prompt
+            )
 
         rows = (
             db.execute(

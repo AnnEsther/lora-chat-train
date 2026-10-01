@@ -542,11 +542,13 @@ async def list_adapters() -> dict:
                     manifest_path = hist_dir / "manifest.json"
                     version = hist_dir.name
                     trained_at = None
+                    run_id = None
                     if manifest_path.exists():
                         try:
                             manifest = json.loads(manifest_path.read_text())
                             version = manifest.get("version", hist_dir.name)
                             trained_at = manifest.get("trained_at")
+                            run_id = manifest.get("run_id")
                         except Exception:
                             pass
                     adapters.append(
@@ -555,17 +557,18 @@ async def list_adapters() -> dict:
                             "version": version,
                             "path": str(hist_dir),
                             "trained_at": trained_at,
+                            "run_id": run_id,
                         }
                     )
         if ADAPTER_DIR.exists() and any(ADAPTER_DIR.iterdir()):
             current_manifest = ADAPTER_DIR / "manifest.json"
             current_version = "v1 (live)"
+            current_run_id = None
             if current_manifest.exists():
                 try:
-                    current_version = (
-                        json.loads(current_manifest.read_text()).get("version", "v1")
-                        + " (live)"
-                    )
+                    current = json.loads(current_manifest.read_text())
+                    current_version = current.get("version", "v1") + " (live)"
+                    current_run_id = current.get("run_id")
                 except Exception:
                     pass
             adapters.append(
@@ -575,6 +578,7 @@ async def list_adapters() -> dict:
                     "path": str(ADAPTER_DIR),
                     "trained_at": None,
                     "is_current": True,
+                    "run_id": current_run_id,
                 }
             )
     except PermissionError as e:

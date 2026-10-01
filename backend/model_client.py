@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_SERVER_URL = os.environ.get("MODEL_SERVER_URL", "http://model_server:8001")
 DEFAULT_MAX_NEW_TOKENS = int(os.environ.get("MAX_NEW_TOKENS", 512))
-TEMPERATURE = float(os.environ.get("TEMPERATURE", 0.7))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", 0.3))
 REQUEST_TIMEOUT = float(os.environ.get("MODEL_REQUEST_TIMEOUT", 300))
 
 SYSTEM_PROMPT = (
@@ -60,6 +60,7 @@ class ModelClient:
         messages: list[dict],
         max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS,
         temperature: float = TEMPERATURE,
+        system_prompt: str | None = None,
     ) -> AsyncIterator[str]:
         """
         Yield text chunks from the model server via SSE streaming.
@@ -67,10 +68,13 @@ class ModelClient:
         Parameters
         ----------
         messages : list of {"role": str, "content": str} — full conversation history
+        system_prompt : overrides the default SYSTEM_PROMPT when given
         """
         assert self._client is not None, "ModelClient not loaded — call load() first"
 
-        messages_with_system = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+        messages_with_system = [
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT}
+        ] + messages
 
         payload = {
             "messages": messages_with_system,
