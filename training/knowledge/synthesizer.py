@@ -20,6 +20,15 @@ CALL_TIMEOUT = int(os.environ.get("QA_SYNTHESIS_TIMEOUT", "60"))
 # Per-item token budget for single-passage synthesis (question + answer, batch=1)
 PASSAGE_MAX_TOKENS = int(os.environ.get("QA_PASSAGE_MAX_TOKENS", "512"))
 
+# Grounded multi-pair synthesis (synthesize_pairs_from_chunk)
+QA_CHUNK_CHARS = int(os.environ.get("QA_CHUNK_CHARS", "1500"))  # text the model sees per call
+QA_PAIRS_PER_CALL = int(os.environ.get("QA_PAIRS_PER_CALL", "5"))
+QA_TOKENS_PER_PAIR = int(os.environ.get("QA_TOKENS_PER_PAIR", "150"))
+QA_CALL_TIMEOUT = int(os.environ.get("QA_CALL_TIMEOUT", "180"))
+QA_MAX_ANSWER_CHARS = 600  # longer answers are paragraph dumps, not answers
+# Share of an answer's content words that must appear in the source text
+QA_MIN_GROUNDING = float(os.environ.get("QA_MIN_GROUNDING", "0.6"))
+
 
 @dataclass
 class SynthesizedQA:
@@ -489,3 +498,158 @@ def _fallback_from_segment(segment: str) -> Optional[dict[str, str]]:
     words = segment.split()
     subject = " ".join(words[:6]).rstrip(".,;:")
     return {"question": f"Can you tell me about {subject}?", "answer": segment}
+
+
+# ── Grounded multi-pair synthesis ─────────────────────────────────────────────
+
+
+def chunk_passage(passage: str, max_chars: int = QA_CHUNK_CHARS) -> list[str]:
+    """Split a passage into chunks of up to ~max_chars, on sentence boundaries.
+
+    Unlike _split_passage, every chunk is small enough to be shown to the model
+    in full, so no part of the passage is silently dropped.
+    """
+    passage = passage.strip()
+    if not passage:
+        return []
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", passage) if s.strip()]
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        # Hard-split a single sentence that is longer than a chunk
+        while len(sentence) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(sentence[:max_chars])
+            sentence = sentence[max_chars:]
+        if current and len(current) + 1 + len(sentence) > max_chars:
+            chunks.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}".strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def allocate_pairs(num_chunks: int, num_pairs: int) -> list[int]:
+    """Spread num_pairs evenly across num_chunks (start, middle and end all covered)."""
+    alloc = [0] * num_chunks
+    if num_chunks == 0:
+        return alloc
+    for i in range(num_pairs):
+        alloc[i * num_chunks // num_pairs] += 1
+    return alloc
+
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+_STOPWORDS = {
+    "the", "and", "that", "this", "with", "from", "they", "their", "there", "were",
+    "was", "are", "for", "has", "had", "have", "into", "its", "it's", "which", "who",
+    "what", "when", "where", "while", "been", "being", "also", "than", "then", "them",
+    "these", "those", "would", "could", "should", "about", "only", "each", "other",
+}
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w for w in _WORD_RE.findall(text.lower()) if len(w) > 3 and w not in _STOPWORDS
+    }
+
+
+def _grounding(answer: str, source: str) -> float:
+    """Share of the answer's content words that appear in the source text."""
+    words = _content_words(answer)
+    if not words:
+        return 1.0
+    return len(words & _content_words(source)) / len(words)
+
+
+def _parse_pairs(response: str) -> list[dict[str, str]]:
+    """Parse a JSON array of {question, answer} objects, tolerating truncation."""
+    clean = re.sub(r"```(?:json)?|```", "", response).strip()
+    start, end = clean.find("["), clean.rfind("]")
+    if start != -1 and end > start:
+        try:
+            items = json.loads(clean[start : end + 1])
+            if isinstance(items, list):
+                return [
+                    {"question": str(i.get("question", "")).strip(),
+                     "answer": str(i.get("answer", "")).strip()}
+                    for i in items
+                    if isinstance(i, dict)
+                ]
+        except json.JSONDecodeError:
+            pass
+    # Truncated or malformed array — salvage every complete object
+    return [
+        {"question": q.strip(), "answer": a.strip()}
+        for q, a in re.findall(
+            r'"question"\s*:\s*"((?:[^"\\]|\\.)+)"\s*,\s*"answer"\s*:\s*"((?:[^"\\]|\\.)+)"',
+            clean,
+        )
+    ]
+
+
+def synthesize_pairs_from_chunk(
+    chunk: str, num_pairs: int, avoid_questions: Optional[list[str]] = None
+) -> list[dict[str, str]]:
+    """
+    Generate up to num_pairs Q&A pairs grounded in one chunk of text.
+
+    Pairs that cannot be parsed, are paragraph-length, or whose answers are not
+    supported by the chunk are dropped — never replaced with the raw text.
+    Uses the base model (adapter disabled) so a trained adapter cannot leak its
+    own guesses into new training data.
+    """
+    avoid = "\n".join(f"- {q}" for q in (avoid_questions or [])[-20:])
+    avoid_block = f"\nDo not repeat these questions:\n{avoid}\n" if avoid else ""
+    prompt = (
+        f'Text:\n"""\n{chunk}\n"""\n\n'
+        f"Write {num_pairs} different question-and-answer pairs about the text above.\n"
+        f"Rules:\n"
+        f"- Use ONLY facts stated in the text. Never add names, events or details "
+        f"that are not in the text.\n"
+        f"- Each answer is 1-3 sentences and directly answers its question.\n"
+        f"- Each question is about a different fact.\n"
+        f"{avoid_block}"
+        f"Respond with ONLY a JSON array, no explanation:\n"
+        f'[{{"question": "...", "answer": "..."}}]'
+    )
+    resp = requests.post(
+        f"{MODEL_SERVER_URL}/generate",
+        json={
+            "prompt": prompt,
+            "max_new_tokens": num_pairs * QA_TOKENS_PER_PAIR + 50,
+            "use_adapter": False,
+        },
+        timeout=QA_CALL_TIMEOUT,
+    )
+    if not resp.ok:
+        raise Exception(f"Model server returned {resp.status_code}")
+    raw = resp.json().get("response", "")
+
+    seen = {q.lower() for q in (avoid_questions or [])}
+    pairs: list[dict[str, str]] = []
+    for pair in _parse_pairs(raw):
+        q, a = pair["question"], pair["answer"]
+        if len(q) <= 5 or len(a) <= 5 or q.lower() in seen:
+            continue
+        if len(a) > QA_MAX_ANSWER_CHARS:
+            logger.info("qa_dropped_too_long", extra={"question": q[:80]})
+            continue
+        score = _grounding(a, chunk)
+        if score < QA_MIN_GROUNDING:
+            logger.info(
+                "qa_dropped_ungrounded",
+                extra={"question": q[:80], "grounding": round(score, 2)},
+            )
+            continue
+        seen.add(q.lower())
+        pairs.append({"question": q, "answer": a})
+        if len(pairs) >= num_pairs:
+            break
+    if not pairs:
+        logger.warning("qa_chunk_no_pairs", extra={"preview": raw[:200]})
+    return pairs

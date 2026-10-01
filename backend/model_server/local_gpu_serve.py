@@ -11,6 +11,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -415,6 +416,7 @@ class GenerateRequest(BaseModel):
     prompt: str
     max_new_tokens: int = 200
     temperature: float = 0.0
+    use_adapter: bool = True  # False = base model only (e.g. synthesizing training data)
 
 
 class TrainRequest(BaseModel):
@@ -461,12 +463,18 @@ async def generate(req: GenerateRequest) -> dict:
     prompt = _build_prompt([{"role": "user", "content": req.prompt}])
     inputs = _tokenizer(prompt, return_tensors="pt").to("cuda")
     with _model_lock, torch.no_grad():
-        outputs = _model.generate(
-            **inputs,
-            max_new_tokens=req.max_new_tokens,
-            do_sample=False,
-            pad_token_id=_tokenizer.eos_token_id,
+        adapter_off = (
+            _model.disable_adapter()
+            if not req.use_adapter and isinstance(_model, PeftModel)
+            else contextlib.nullcontext()
         )
+        with adapter_off:
+            outputs = _model.generate(
+                **inputs,
+                max_new_tokens=req.max_new_tokens,
+                do_sample=False,
+                pad_token_id=_tokenizer.eos_token_id,
+            )
     generated = outputs[0][inputs["input_ids"].shape[-1] :]
     return {"response": _tokenizer.decode(generated, skip_special_tokens=True)}
 

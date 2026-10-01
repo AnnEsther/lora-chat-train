@@ -26,16 +26,18 @@ BASE_MODEL = os.environ.get(
 HF_TRAINING_ENDPOINT = os.environ.get("HF_TRAINING_ENDPOINT", "")
 
 # LoRA / training hyperparameters — override via env
-LORA_R = int(os.environ.get("LORA_R", 16))
-LORA_ALPHA = int(os.environ.get("LORA_ALPHA", 32))
+LORA_R = int(os.environ.get("LORA_R", 32))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", 64))
 LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", 0.05))
-LORA_TARGET_MODULES = os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(",")
+LORA_TARGET_MODULES = os.environ.get(
+    "LORA_TARGET_MODULES", "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+).split(",")
 
-TRAIN_EPOCHS = int(os.environ.get("TRAIN_EPOCHS", 3))
-TRAIN_BATCH_SIZE = int(os.environ.get("TRAIN_BATCH_SIZE", 4))
-TRAIN_GRAD_ACCUM = int(os.environ.get("TRAIN_GRAD_ACCUM", 4))
+TRAIN_EPOCHS = int(os.environ.get("TRAIN_EPOCHS", 5))
+TRAIN_BATCH_SIZE = int(os.environ.get("TRAIN_BATCH_SIZE", 2))
+TRAIN_GRAD_ACCUM = int(os.environ.get("TRAIN_GRAD_ACCUM", 8))
 TRAIN_LR = float(os.environ.get("TRAIN_LR", 2e-4))
-MAX_SEQ_LENGTH = int(os.environ.get("MAX_SEQ_LENGTH", 512))
+MAX_SEQ_LENGTH = int(os.environ.get("MAX_SEQ_LENGTH", 1024))
 
 
 class HFTrainingLauncher:
@@ -204,6 +206,42 @@ class HFTrainingLauncher:
 # ── Local SFTTrainer (run inside container or RunPod) ─────────────────────────
 
 
+def _completion_only_collator(tokenizer):
+    """Collator that computes loss only on the assistant's answer.
+
+    Without it, most of each example's loss is spent re-learning the long system
+    prompt and the question, and little goes into the answer facts. The response
+    marker (e.g. "[/INST]" for Mistral) is read from the tokenizer's own chat
+    template, so this works for any base model. Returns None (train on all
+    tokens) if the marker can't be found reliably.
+    """
+    from trl import DataCollatorForCompletionOnlyLM
+
+    try:
+        probe = tokenizer.apply_chat_template(
+            [
+                {"role": "user", "content": "QQQQ"},
+                {"role": "assistant", "content": "AAAA"},
+            ],
+            tokenize=False,
+        )
+        marker = probe.split("QQQQ", 1)[1].split("AAAA", 1)[0].strip()
+        marker_ids = tokenizer.encode(marker, add_special_tokens=False)
+        probe_ids = tokenizer.encode(probe, add_special_tokens=False)
+        found = marker_ids and any(
+            probe_ids[i : i + len(marker_ids)] == marker_ids
+            for i in range(len(probe_ids) - len(marker_ids) + 1)
+        )
+        if not found:
+            raise ValueError(f"response marker {marker!r} not found in tokenized probe")
+    except Exception as exc:
+        logger.warning("completion_only_disabled", extra={"error": str(exc)})
+        return None
+
+    logger.info("completion_only_loss", extra={"response_marker": marker})
+    return DataCollatorForCompletionOnlyLM(response_template=marker_ids, tokenizer=tokenizer)
+
+
 def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     """Run LoRA SFT training locally on GPU. Downloads dataset from S3 if no local path."""
     import tempfile
@@ -276,15 +314,10 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
 
     # ── Apply LoRA ────────────────────────────────────────────────────────────
     lora_config = LoraConfig(
-        r=lora_cfg.get("r", int(os.environ.get("LORA_R", 16))),
-        lora_alpha=lora_cfg.get("lora_alpha", int(os.environ.get("LORA_ALPHA", 32))),
-        lora_dropout=lora_cfg.get(
-            "lora_dropout", float(os.environ.get("LORA_DROPOUT", 0.05))
-        ),
-        target_modules=lora_cfg.get(
-            "target_modules",
-            os.environ.get("LORA_TARGET_MODULES", "q_proj,v_proj").split(","),
-        ),
+        r=lora_cfg.get("r", LORA_R),
+        lora_alpha=lora_cfg.get("lora_alpha", LORA_ALPHA),
+        lora_dropout=lora_cfg.get("lora_dropout", LORA_DROPOUT),
+        target_modules=lora_cfg.get("target_modules", LORA_TARGET_MODULES),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -298,26 +331,23 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
     # ── Train ─────────────────────────────────────────────────────────────────
     logger.info(
         "training_start",
-        extra={"samples": len(dataset), "epochs": train_cfg.get("num_train_epochs", 3)},
+        extra={
+            "samples": len(dataset),
+            "epochs": train_cfg.get("num_train_epochs", TRAIN_EPOCHS),
+        },
     )
 
     sft_config = SFTConfig(
         output_dir=str(output_dir),
-        num_train_epochs=train_cfg.get(
-            "num_train_epochs", int(os.environ.get("TRAIN_EPOCHS", 3))
-        ),
+        num_train_epochs=train_cfg.get("num_train_epochs", TRAIN_EPOCHS),
         per_device_train_batch_size=train_cfg.get(
-            "per_device_train_batch_size", int(os.environ.get("TRAIN_BATCH_SIZE", 4))
+            "per_device_train_batch_size", TRAIN_BATCH_SIZE
         ),
         gradient_accumulation_steps=train_cfg.get(
-            "gradient_accumulation_steps", int(os.environ.get("TRAIN_GRAD_ACCUM", 4))
+            "gradient_accumulation_steps", TRAIN_GRAD_ACCUM
         ),
-        learning_rate=train_cfg.get(
-            "learning_rate", float(os.environ.get("TRAIN_LR", 2e-4))
-        ),
-        max_seq_length=train_cfg.get(
-            "max_seq_length", int(os.environ.get("MAX_SEQ_LENGTH", 512))
-        ),
+        learning_rate=train_cfg.get("learning_rate", TRAIN_LR),
+        max_seq_length=train_cfg.get("max_seq_length", MAX_SEQ_LENGTH),
         lr_scheduler_type=train_cfg.get("lr_scheduler_type", "cosine"),
         warmup_ratio=train_cfg.get("warmup_ratio", 0.05),
         bf16=False,  # T4 does not support bfloat16
@@ -334,6 +364,7 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
         args=sft_config,
         train_dataset=dataset,
         tokenizer=tokenizer,
+        data_collator=_completion_only_collator(tokenizer),
     )
 
     trainer.train()

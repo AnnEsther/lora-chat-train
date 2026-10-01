@@ -45,9 +45,10 @@ from shared.slack_notifier import (
     insufficient_data_warning,
 )
 from training.knowledge.synthesizer import (
-    _split_passage,
-    _synthesize_one,
-    _fallback_from_segment,
+    QA_PAIRS_PER_CALL,
+    allocate_pairs,
+    chunk_passage,
+    synthesize_pairs_from_chunk,
 )
 
 MIN_TRAINING_SAMPLES: int = int(os.environ.get("MIN_TRAINING_SAMPLES", 10))
@@ -467,72 +468,77 @@ async def _synthesize_and_stream(
     loop = asyncio.get_event_loop()
 
     try:
-        # Split passage into segments upfront so we can tell the frontend how many to expect
-        segments = _split_passage(passage.strip(), max_parts=num_qa)
-        yield f"data: {json.dumps({'type': 'start', 'segment_count': len(segments)})}\n\n"
+        # The whole passage is chunked so every part is shown to the model in full;
+        # num_qa pairs are spread evenly across the chunks.
+        chunks = chunk_passage(passage)
+        allocation = allocate_pairs(len(chunks), num_qa)
+        yield f"data: {json.dumps({'type': 'start', 'segment_count': num_qa})}\n\n"
 
-        for i, segment in enumerate(segments):
-            # Run synthesis for this segment in the thread pool (blocking HTTP call to model server)
-            try:
-                pair_dict = await loop.run_in_executor(
-                    None,
-                    lambda seg=segment: _synthesize_one(
-                        seg, session.training_system_prompt
-                    ),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "segment_synthesis_failed",
-                    extra={
-                        "segment": i,
-                        "error": str(exc),
-                        "session_id": str(session.id),
-                    },
-                )
-                pair_dict = None
+        for i, (chunk, wanted) in enumerate(zip(chunks, allocation)):
+            asked: list[str] = []
+            # A call may return fewer pairs than asked (dropped as ungrounded or
+            # unparseable), so allow one extra attempt per chunk to fill the gap.
+            max_calls = -(-wanted // QA_PAIRS_PER_CALL) + 1 if wanted else 0
+            for _ in range(max_calls):
+                remaining = wanted - len(asked)
+                if remaining <= 0:
+                    break
+                try:
+                    pairs = await loop.run_in_executor(
+                        None,
+                        lambda c=chunk, n=min(remaining, QA_PAIRS_PER_CALL), a=list(
+                            asked
+                        ): synthesize_pairs_from_chunk(c, n, a),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "chunk_synthesis_failed",
+                        extra={
+                            "chunk": i,
+                            "error": str(exc),
+                            "session_id": str(session.id),
+                        },
+                    )
+                    pairs = []
 
-            # If the model returned nothing parseable, use the no-model fallback
-            # (guaranteed to always return a pair from the segment text itself)
-            if pair_dict is None:
+                # Heartbeat keeps the SSE connection alive between model calls
+                yield 'data: {"type":"heartbeat"}\n\n'
+
+                for pair_dict in pairs:
+                    asked.append(pair_dict["question"])
+
+                    # Persist immediately
+                    qa = SynthesizedQA(
+                        id=uuid.uuid4(),
+                        session_id=session.id,
+                        source_turn_id=user_turn.id if user_turn is not None else None,
+                        source_document_name=source_document_name,
+                        question=pair_dict["question"],
+                        answer=pair_dict["answer"],
+                        validated=False,
+                        edited=False,
+                    )
+                    db.add(qa)
+                    await db.commit()
+                    await db.refresh(qa)
+
+                    # Stream the pair immediately — card appears in the chat window now
+                    yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False, 'source_document_name': source_document_name}})}\n\n"
+
+                    logger.info(
+                        "pair_streamed",
+                        extra={
+                            "chunk": i,
+                            "session_id": str(session.id),
+                            "qa_id": str(qa.id),
+                        },
+                    )
+
+            if len(asked) < wanted:
                 logger.info(
-                    "using_fallback",
-                    extra={"segment": i, "session_id": str(session.id)},
+                    "chunk_short_of_pairs",
+                    extra={"chunk": i, "wanted": wanted, "got": len(asked)},
                 )
-                pair_dict = _fallback_from_segment(segment)
-
-            # Heartbeat keeps the SSE connection alive between model calls
-            yield 'data: {"type":"heartbeat"}\n\n'
-
-            if not pair_dict:
-                logger.info("segment_no_pair", extra={"segment": i})
-                continue
-
-            # Persist immediately
-            qa = SynthesizedQA(
-                id=uuid.uuid4(),
-                session_id=session.id,
-                source_turn_id=user_turn.id if user_turn is not None else None,
-                source_document_name=source_document_name,
-                question=pair_dict["question"],
-                answer=pair_dict["answer"],
-                validated=False,
-                edited=False,
-            )
-            db.add(qa)
-            await db.commit()
-            await db.refresh(qa)
-
-            # Stream the pair immediately — card appears in the chat window now
-            yield f"data: {json.dumps({'type': 'qa_pair', 'pair': {'id': str(qa.id), 'question': qa.question, 'answer': qa.answer, 'validated': False, 'edited': False, 'source_document_name': source_document_name}})}\n\n"
-
-            logger.info(
-                "pair_streamed",
-                extra={
-                    "segment": i,
-                    "session_id": str(session.id),
-                    "qa_id": str(qa.id),
-                },
-            )
 
         # Final count update
         total_result = await db.execute(
