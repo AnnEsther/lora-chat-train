@@ -970,6 +970,14 @@ export default function ChatPage() {
     if (!session || uploadLoading) return;
     if (!["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA", "FAILED"].includes(session.state)) return;
 
+    // Client-side size check — reject immediately before any network request
+    const MAX_FILE_BYTES = 50 * 1024 * 1024; // 50 MB
+    if (file.size > MAX_FILE_BYTES) {
+      setError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum upload size is 50 MB.`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     setUploadLoading(true);
     setError(null);
 
@@ -1488,9 +1496,8 @@ export default function ChatPage() {
               <input
                 type="number"
                 min={1}
-                max={20}
                 value={numQa}
-                onChange={(e) => setNumQa(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                onChange={(e) => setNumQa(Math.max(1, parseInt(e.target.value) || 1))}
                 disabled={!isAcceptingInput}
                 title="Number of Q&A pairs to generate"
                 className="w-14 rounded-lg border border-gray-300 px-2 py-2.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-50 disabled:text-gray-400 disabled:cursor-not-allowed"

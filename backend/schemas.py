@@ -45,8 +45,7 @@ class ChatRequest(BaseModel):
     num_qa: int = Field(
         default=5,
         ge=1,
-        le=20,
-        description="Number of Q&A pairs to generate from this passage (1–20).",
+        description="Number of Q&A pairs to generate from this passage (minimum 1).",
     )
 
 

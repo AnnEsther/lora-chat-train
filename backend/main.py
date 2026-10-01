@@ -63,8 +63,11 @@ logger = logging.getLogger(__name__)
 MAX_SESSION_TOKENS: int = int(os.environ.get("MAX_SESSION_TOKENS", 4096))
 PRE_SLEEP_THRESHOLD: int = int(os.environ.get("PRE_SLEEP_THRESHOLD", 512))
 MAX_UPLOAD_BYTES: int = int(
-    os.environ.get("MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
-)  # 10 MB default
+    os.environ.get("MAX_UPLOAD_BYTES", 50 * 1024 * 1024)
+)  # 50 MB default
+MAX_PASSAGE_CHARS: int = int(
+    os.environ.get("MAX_PASSAGE_CHARS", 200_000)
+)  # ~60 pages of text
 
 
 @asynccontextmanager
@@ -319,7 +322,7 @@ def _extract_text_from_upload(filename: str, data: bytes) -> str:
 async def upload_document(
     session_id: uuid.UUID,
     file: UploadFile = File(...),
-    num_qa: int = Form(default=5, ge=1, le=20),
+    num_qa: int = Form(default=5, ge=1),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """
@@ -331,7 +334,7 @@ async def upload_document(
 
     Form fields:
         file    — the uploaded file (multipart)
-        num_qa  — number of Q&A pairs to generate (1–20, default 5)
+        num_qa  — number of Q&A pairs to generate (default 5)
 
     SSE events (identical to /chat):
         {"type": "start", "segment_count": N}
@@ -387,7 +390,21 @@ async def upload_document(
     if not text.strip():
         raise HTTPException(
             status_code=422,
-            detail="Document appears to be empty or has no extractable text.",
+            detail="Document appears to be empty or has no extractable text. If this is a scanned/image-only PDF, text extraction is not supported.",
+        )
+
+    # Truncate to MAX_PASSAGE_CHARS (~60 pages) to keep synthesis time reasonable.
+    # num_qa controls how many pairs are generated; this caps the raw input only.
+    original_len = len(text)
+    if original_len > MAX_PASSAGE_CHARS:
+        text = text[:MAX_PASSAGE_CHARS]
+        logger.info(
+            "document_truncated",
+            extra={
+                "session_id": str(session_id),
+                "original_chars": original_len,
+                "truncated_to": MAX_PASSAGE_CHARS,
+            },
         )
 
     logger.info(
