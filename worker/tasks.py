@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))  # project root
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))  # for models
 
 from celery import Celery
+from celery.signals import task_failure
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session as DBSession
 
@@ -84,6 +85,84 @@ def _set_failure_reason(session_id: str, reason: str, db: DBSession) -> None:
     if session:
         session.failure_reason = reason
         db.commit()
+
+
+def _set_progress(run_id: str, **fields) -> None:
+    """Merge live pipeline progress into training_runs.config["progress"].
+
+    Read by GET /sessions/{id}/training so the web app can show the current
+    stage, step, loss and ETA. Never raises — progress is best-effort.
+    """
+    from backend.models import TrainingRun
+
+    try:
+        with _db() as db:
+            run = db.get(TrainingRun, uuid.UUID(run_id))
+            if run is None:
+                return
+            config = dict(run.config or {})
+            progress = dict(config.get("progress") or {})
+            progress.update(fields)
+            progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+            config["progress"] = progress
+            run.config = config  # reassign so SQLAlchemy sees the JSON change
+            db.commit()
+    except Exception as exc:
+        logger.warning(f"set_progress_failed run={run_id}: {exc}")
+
+
+def _merged_config(run_id: str, new: dict) -> dict:
+    """The run's stored config with `new` merged over it (keeps progress, mm_post_id)."""
+    from backend.models import TrainingRun
+
+    with _db() as db:
+        run = db.get(TrainingRun, uuid.UUID(run_id))
+        existing = dict(run.config or {}) if run else {}
+    return {**existing, **new}
+
+
+# Tasks called as task(prev, session_id, run_id) in the training chain
+_PIPELINE_TASKS = {
+    "tasks.build_dataset",
+    "tasks.launch_training",
+    "tasks.poll_training",
+    "tasks.run_evaluation",
+    "tasks.deploy_or_rollback",
+}
+
+
+@task_failure.connect
+def _on_pipeline_failure(sender=None, exception=None, args=None, **_kwargs) -> None:
+    """Any crash in the training chain marks the run and session FAILED.
+
+    Without this, an unexpected exception (e.g. in evaluation) left the session
+    stuck in TRAINING/EVALUATING and the web app spinning forever.
+    """
+    name = getattr(sender, "name", "")
+    if name not in _PIPELINE_TASKS or not args or len(args) < 3:
+        return
+    session_id, run_id = str(args[1]), str(args[2])
+    stage = name.split(".", 1)[-1]
+    error = f"{type(exception).__name__}: {exception}"[:300]
+    _set_progress(run_id, stage="failed", failed_stage=stage, error=error)
+    try:
+        from backend.models import Session as ChatSession, TrainingRun
+
+        with _db() as db:
+            run = db.get(TrainingRun, uuid.UUID(run_id))
+            if run and run.status not in ("FAILED", "ROLLED_BACK"):
+                run.status = "FAILED"
+                run.finished_at = datetime.now(timezone.utc)
+            session = db.get(ChatSession, uuid.UUID(session_id))
+            if session and session.state != "FAILED":
+                session.state = "FAILED"
+                session.failure_reason = f"Pipeline failed during {stage}: {error}"
+            db.commit()
+    except Exception as exc:
+        logger.warning(f"pipeline_failure_update_failed run={run_id}: {exc}")
+    from shared.slack_notifier import backend_error
+
+    backend_error(f"pipeline {stage}", error, run_id[:8], session_id)
 
 
 # ── Pipeline tasks ────────────────────────────────────────────────────────────
@@ -187,6 +266,7 @@ def enqueue_phase2_pipeline(self, session_id: str) -> None:
 
     with _db() as db:
         config = {"mm_post_id": mm_post_id} if mm_post_id else {}
+        config["progress"] = {"stage": "queued"}
         run = TrainingRun(
             id=uuid.uuid4(),
             session_id=uuid.UUID(session_id),
@@ -366,6 +446,8 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
         )
         return prev
 
+    _set_progress(run_id, stage="building_dataset")
+
     from training.datasets.dataset_writer import DatasetWriter
     from shared.s3_uploader import upload_dataset_jsonl
     from shared.slack_notifier import dataset_built
@@ -414,6 +496,7 @@ def build_dataset(self, prev: dict, session_id: str, run_id: str) -> dict:
         dataset_id = str(dataset.id)
 
     dataset_built(session_id, len(samples), dataset_s3)
+    _set_progress(run_id, samples=len(samples))
 
     # Update the live Mattermost message — Phase 2 is now running
     from shared.mattermost_notifier import training_launched as mm_training_launched
@@ -837,7 +920,7 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
                 "RUNNING",
                 db,
                 hf_job_id=hf_job_id,
-                config=config,
+                config=_merged_config(run_id, config),
                 started_at=datetime.now(timezone.utc),
             )
         training_started(run_id, session_id, hf_job_id)
@@ -873,12 +956,17 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
             "RUNNING",
             db,
             hf_job_id=f"local_{run_id}",
-            config=config,
+            config=_merged_config(run_id, config),
             started_at=datetime.now(timezone.utc),
         )
+    _set_progress(run_id, stage="loading_model")
 
     try:
-        output_dir = train_local(config, dataset_local)
+        output_dir = train_local(
+            config,
+            dataset_local,
+            progress_cb=lambda **fields: _set_progress(run_id, **fields),
+        )
     except Exception as exc:
         logger.error(
             "local_training_failed", extra={"run_id": run_id, "error": str(exc)}
@@ -892,6 +980,7 @@ def launch_training(self, prev: dict, session_id: str, run_id: str) -> dict:
             _set_failure_reason(session_id, f"Local training failed: {exc}", db)
         raise
 
+    _set_progress(run_id, stage="uploading_adapter")
     adapter_s3 = upload_adapter(run_id, output_dir)
     artifact_uploaded(run_id, "adapter", adapter_s3)
 
@@ -1024,6 +1113,7 @@ def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:
     from shared.mattermost_notifier import eval_result as mm_eval_result
 
     evaluation_started(run_id)
+    _set_progress(run_id, stage="evaluating")
 
     artifact_dir = prev["artifact_dir"]
     evaluator = Evaluator()
@@ -1046,6 +1136,7 @@ def run_evaluation(self, prev: dict, session_id: str, run_id: str) -> dict:
         _update_session_state(session_id, "DEPLOYING", db)
 
     evaluation_completed(run_id, passed, score, eval_s3)
+    _set_progress(run_id, eval_passed=passed, eval_score=score)
 
     # Update the live Mattermost message with eval result
     with _db() as db:
@@ -1112,9 +1203,11 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
                 "Evaluation failed — the new adapter did not pass quality checks.",
                 db,
             )
+        _set_progress(run_id, stage="done", outcome="rejected")
         return {"status": "rejected"}
 
     deployment_approved(run_id, version=run_id[:8])
+    _set_progress(run_id, stage="deploying")
 
     try:
         previous_version = manager.get_current_production_version()
@@ -1136,6 +1229,7 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
             with _db() as db:
                 _update_run_status(run_id, "ROLLED_BACK", db)
                 _update_session_state(session_id, "READY", db)
+            _set_progress(run_id, stage="done", outcome="rolled_back")
             return {"status": "rolled_back"}
 
         mm_pipeline_finished(
@@ -1148,6 +1242,7 @@ def deploy_or_rollback(self, prev: dict, session_id: str, run_id: str) -> dict:
         with _db() as db:
             _update_run_status(run_id, "SUCCEEDED", db)
             _update_session_state(session_id, "READY", db)
+        _set_progress(run_id, stage="done", outcome="deployed")
         return {"status": "deployed", "version": run_id[:8]}
 
     except Exception as exc:

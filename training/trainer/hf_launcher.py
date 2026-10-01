@@ -242,8 +242,59 @@ def _completion_only_collator(tokenizer):
     return DataCollatorForCompletionOnlyLM(response_template=marker_ids, tokenizer=tokenizer)
 
 
-def train_local(config: dict, dataset_path: str | Path = "") -> Path:
-    """Run LoRA SFT training locally on GPU. Downloads dataset from S3 if no local path."""
+def _progress_callback(progress_cb, min_interval: float = 10.0):
+    """TrainerCallback reporting step, loss, epoch and ETA via progress_cb(**fields).
+
+    Writes are throttled to one per min_interval seconds (plus every logged loss).
+    """
+    from transformers import TrainerCallback
+
+    class _Progress(TrainerCallback):
+        def __init__(self):
+            self.started = None
+            self.last_write = 0.0
+            self.loss = None
+
+        def _report(self, state, force=False):
+            now = time.time()
+            if not force and now - self.last_write < min_interval:
+                return
+            self.last_write = now
+            step, total = state.global_step, state.max_steps or 0
+            elapsed = now - (self.started or now)
+            eta = elapsed / step * (total - step) if step and total else None
+            try:
+                progress_cb(
+                    stage="training",
+                    step=step,
+                    total_steps=total,
+                    epoch=round(state.epoch or 0, 2),
+                    loss=self.loss,
+                    eta_seconds=round(eta) if eta is not None else None,
+                )
+            except Exception as exc:  # progress must never break training
+                logger.warning(f"progress_cb_failed: {exc}")
+
+        def on_train_begin(self, args, state, control, **kwargs):
+            self.started = time.time()
+            self._report(state, force=True)
+
+        def on_step_end(self, args, state, control, **kwargs):
+            self._report(state)
+
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            if logs and "loss" in logs:
+                self.loss = round(float(logs["loss"]), 4)
+                self._report(state, force=True)
+
+    return _Progress()
+
+
+def train_local(config: dict, dataset_path: str | Path = "", progress_cb=None) -> Path:
+    """Run LoRA SFT training locally on GPU. Downloads dataset from S3 if no local path.
+
+    progress_cb(**fields), if given, receives live training progress for the web app.
+    """
     import tempfile
     import boto3
 
@@ -365,6 +416,7 @@ def train_local(config: dict, dataset_path: str | Path = "") -> Path:
         train_dataset=dataset,
         tokenizer=tokenizer,
         data_collator=_completion_only_collator(tokenizer),
+        callbacks=[_progress_callback(progress_cb)] if progress_cb else None,
     )
 
     trainer.train()

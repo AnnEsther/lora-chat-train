@@ -59,14 +59,35 @@ interface QACount {
   ready_to_train: boolean;
 }
 
-interface TrainStatus {
-  status: "idle" | "running" | "completed" | "failed";
-  run_id?: string;
-  progress: string;
-  started_at: string | null;
-  finished_at: string | null;
-  vram_used_gb: number | null;
-  vram_free_gb: number | null;
+// Live pipeline progress written by the worker (GET /sessions/{id}/training)
+interface TrainingProgress {
+  stage?: "queued" | "building_dataset" | "loading_model" | "training" | "uploading_adapter" | "evaluating" | "deploying" | "done" | "failed";
+  samples?: number;
+  step?: number;
+  total_steps?: number;
+  epoch?: number;
+  loss?: number | null;
+  eta_seconds?: number | null;
+  eval_passed?: boolean;
+  eval_score?: number;
+  outcome?: "deployed" | "rolled_back" | "rejected";
+  failed_stage?: string;
+  error?: string;
+  updated_at?: string;
+}
+
+interface TrainingInfo {
+  session_state: SessionState;
+  failure_reason: string | null;
+  run: {
+    id: string;
+    status: string;
+    created_at: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    eval_passed: boolean | null;
+    progress: TrainingProgress;
+  } | null;
 }
 
 interface ModelHealth {
@@ -167,38 +188,122 @@ function PipelineStep({ label, state }: { label: string; state: "done" | "active
   );
 }
 
-function getPipelineSteps(sessionState: SessionState, trainStatus?: TrainStatus) {
-  const steps = ["Build dataset", "Train model", "Evaluate", "Deploy adapter"];
-  const stateToActiveStep: Record<SessionState, number> = {
-    TRAINING: 1, EVALUATING: 2, DEPLOYING: 3, READY: 3,
-    FAILED: -1, ACTIVE: -1, PRE_SLEEP_WARNING: -1, INSUFFICIENT_DATA: -1, VALIDATING: 0, SLEEPING: 1,
-  };
-  if (trainStatus?.status === "completed") return steps.map((label) => ({ label, state: "done" as const }));
-  const activeStep = stateToActiveStep[sessionState] ?? -1;
-  return steps.map((label, i) => {
-    if (sessionState === "FAILED") return { label, state: i < activeStep ? "done" : i === activeStep ? "failed" : "pending" } as const;
-    if (i < activeStep) return { label, state: "done" } as const;
-    if (i === activeStep) return { label, state: "active" } as const;
-    return { label, state: "pending" } as const;
-  });
-}
-
 function elapsed(isoStr: string | null): string {
   if (!isoStr) return "—";
-  const secs = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+  return duration(Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000));
+}
+
+function duration(secs: number): string {
   if (secs < 60)   return `${secs}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
+// ── Training progress card ────────────────────────────────────────────────────
+
+// Worker stages in pipeline order
+const TRAINING_STAGES: { key: string; label: string }[] = [
+  { key: "building_dataset",  label: "Build dataset" },
+  { key: "loading_model",     label: "Load base model" },
+  { key: "training",          label: "Train" },
+  { key: "uploading_adapter", label: "Save adapter" },
+  { key: "evaluating",        label: "Evaluate" },
+  { key: "deploying",         label: "Deploy" },
+];
+
+/** Which stage a failure happened in, from the Celery task that crashed. */
+function failedStageIndex(p: TrainingProgress): number {
+  if (p.failed_stage === "launch_training" || p.failed_stage === "poll_training") {
+    if (p.step === undefined) return 1;                                  // never reached training
+    return p.total_steps && p.step >= p.total_steps ? 3 : 2;             // after / during training
+  }
+  return { build_dataset: 0, run_evaluation: 4, deploy_or_rollback: 5 }[p.failed_stage ?? ""] ?? 0;
+}
+
+const OUTCOME_TEXT: Record<string, string> = {
+  deployed:    "New adapter deployed — select it in Glyph Chat or start a new session with it.",
+  rolled_back: "Smoke test failed — rolled back to the previous adapter.",
+  rejected:    "Evaluation did not pass — adapter was not deployed.",
+};
+
+function TrainingProgressCard({ info, onRestart }: { info: TrainingInfo; onRestart?: () => void }) {
+  const run = info.run;
+  if (!run) return null;
+  const p = run.progress ?? {};
+  const failed = p.stage === "failed" || run.status === "FAILED" || info.session_state === "FAILED";
+  const done = p.stage === "done";
+
+  // Index of the stage currently running (or where it stopped)
+  let current = TRAINING_STAGES.findIndex((s) => s.key === p.stage);
+  if (p.stage === "failed") current = failedStageIndex(p);
+  else if (failed) current = Math.max(current, 0);   // failed before the worker reported a stage
+  if (done) current = TRAINING_STAGES.length;
+  if (p.stage === "queued" || (!p.stage && !failed)) current = 0;
+
+  const stepPct = p.total_steps ? Math.min(100, Math.round(((p.step ?? 0) / p.total_steps) * 100)) : 0;
+  const headline = failed ? "Training failed"
+    : done ? (p.outcome === "deployed" ? "Training complete" : "Training finished — not deployed")
+    : p.stage === "queued" || !p.stage ? "Queued — waiting for the worker…"
+    : `${TRAINING_STAGES[current]?.label ?? "Working"}…`;
+
+  return (
+    <div className={`rounded-lg border px-4 py-3 text-sm ${failed ? "bg-red-50 border-red-200" : done ? "bg-green-50 border-green-200" : "bg-blue-50 border-blue-200"}`}>
+      <div className="flex items-center justify-between mb-2">
+        <span className={`font-medium ${failed ? "text-red-700" : done ? "text-green-700" : "text-blue-800"}`}>{headline}</span>
+        <span className="text-xs text-gray-500">run {run.id.slice(0, 8)}{run.started_at ? ` · ${run.finished_at ? "took " + duration(Math.floor((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000)) : elapsed(run.started_at)}` : ""}</span>
+      </div>
+
+      {TRAINING_STAGES.map((s, i) => {
+        const state = failed && i === current ? "failed" : i < current ? "done" : i === current && !failed && !done ? "active" : "pending";
+        let label = s.label;
+        if (s.key === "building_dataset" && p.samples !== undefined) label += ` — ${p.samples} samples`;
+        if (s.key === "evaluating" && p.eval_score !== undefined) label += ` — score ${p.eval_score.toFixed(3)}${p.eval_passed ? " ✓" : " ✗"}`;
+        return (
+          <div key={s.key}>
+            <PipelineStep label={label} state={state} />
+            {s.key === "training" && p.total_steps !== undefined && (state === "active" || (state === "failed" && p.step !== undefined)) && (
+              <div className="ml-6 mb-1">
+                <div className="h-2 rounded-full bg-white border border-blue-100 overflow-hidden">
+                  <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${stepPct}%` }} />
+                </div>
+                <div className="flex flex-wrap gap-x-3 text-xs text-gray-600 mt-1">
+                  <span>step {p.step ?? 0}/{p.total_steps} ({stepPct}%)</span>
+                  {p.epoch !== undefined && <span>epoch {p.epoch}</span>}
+                  {p.loss != null && <span>loss {p.loss}</span>}
+                  {p.eta_seconds != null && state === "active" && <span>~{duration(p.eta_seconds)} left</span>}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {done && p.outcome && <p className="text-xs text-gray-700 mt-2">{OUTCOME_TEXT[p.outcome]}</p>}
+      {failed && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-red-700 break-words">{info.failure_reason ?? p.error ?? "Unknown error — check the worker logs."}</p>
+          {onRestart && (
+            <button onClick={onRestart} className="text-xs px-3 py-1.5 rounded bg-red-100 hover:bg-red-200 text-red-700">
+              Restart training
+            </button>
+          )}
+        </div>
+      )}
+      {!failed && !done && p.updated_at && (Date.now() - new Date(p.updated_at).getTime()) > 10 * 60 * 1000 && (
+        <p className="text-xs text-amber-700 mt-2">No progress update for {elapsed(p.updated_at)} — check <code>docker compose logs worker</code>.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Diagnostic panel ──────────────────────────────────────────────────────────
 
 function DiagnosticPanel({
-  session, health, trainStatus, lastPoll, selectedAdapter, adapters, qaCount, onRestartTraining,
+  session, health, training, lastPoll, selectedAdapter, adapters, qaCount, onRestartTraining,
 }: {
   session: Session | null;
   health: ModelHealth | null;
-  trainStatus: TrainStatus | null;
+  training: TrainingInfo | null;
   lastPoll: Date | null;
   selectedAdapter: string;
   adapters: Adapter[];
@@ -208,8 +313,6 @@ function DiagnosticPanel({
   const gpu = health?.gpu ?? null;
   const vramPct = gpu ? gpu.vram_used_gb / gpu.vram_total_gb : 0;
   const tokenPct = session ? session.total_tokens / session.max_tokens : 0;
-  const isTraining = trainStatus?.status === "running";
-  const pipelineSteps = session ? getPipelineSteps(session.state, trainStatus ?? undefined) : [];
   const adapterVersion = adapters.find(a => a.id === selectedAdapter)?.version ?? "Base model";
 
   return (
@@ -267,41 +370,10 @@ function DiagnosticPanel({
         </>
       )}
 
-      {session && !["ACTIVE", "PRE_SLEEP_WARNING"].includes(session.state) && (
+      {training?.run && session && !["ACTIVE", "PRE_SLEEP_WARNING", "INSUFFICIENT_DATA"].includes(session.state) && (
         <>
-          <SectionHeader title="Pipeline" dot="bg-amber-400" />
-          <div className="bg-white rounded-lg border border-gray-200 px-3 py-2">
-            {pipelineSteps.map((step) => <PipelineStep key={step.label} label={step.label} state={step.state} />)}
-          </div>
-        </>
-      )}
-
-      {trainStatus && trainStatus.status !== "idle" && (
-        <>
-          <SectionHeader title="Training" dot={trainStatus.status === "failed" ? "bg-red-400" : isTraining ? "bg-blue-400 animate-pulse" : "bg-green-400"} />
-          <div className={`rounded-lg border px-3 py-2 ${trainStatus.status === "failed" ? "bg-red-50 border-red-200" : "bg-white border-gray-200"}`}>
-            <StatRow label="Status" value={trainStatus.status.charAt(0).toUpperCase() + trainStatus.status.slice(1)} valueColor={trainStatus.status === "failed" ? "text-red-600" : undefined} />
-            {trainStatus.run_id && <StatRow label="Run ID" value={trainStatus.run_id.slice(0, 8) + "…"} />}
-            <div className="py-1.5">
-              <p className="text-xs text-gray-500 mb-0.5">Progress</p>
-              <p className={`text-xs leading-relaxed ${trainStatus.status === "failed" ? "text-red-700" : "text-gray-800"}`}>{trainStatus.progress || "—"}</p>
-            </div>
-            {trainStatus.started_at && <StatRow label="Running for" value={elapsed(trainStatus.started_at)} />}
-            {trainStatus.finished_at && <StatRow label="Finished" value={new Date(trainStatus.finished_at).toLocaleTimeString()} />}
-            {trainStatus.status === "failed" && session && (
-              <button
-                onClick={async () => {
-                  try {
-                    const resp = await fetch(`${API_URL}/sessions/${session.id}/restart-training`, { method: "POST" });
-                    if (resp.ok && onRestartTraining) onRestartTraining();
-                  } catch {}
-                }}
-                className="mt-2 w-full text-xs px-3 py-1.5 rounded bg-red-100 hover:bg-red-200 text-red-700"
-              >
-                Restart Training
-              </button>
-            )}
-          </div>
+          <SectionHeader title="Training" dot={training.run.progress?.stage === "failed" || session.state === "FAILED" ? "bg-red-400" : training.run.progress?.stage === "done" ? "bg-green-400" : "bg-blue-400 animate-pulse"} />
+          <TrainingProgressCard info={training} onRestart={onRestartTraining} />
         </>
       )}
 
@@ -309,7 +381,6 @@ function DiagnosticPanel({
       <div className="bg-white rounded-lg border border-gray-200 px-3 py-2 space-y-1">
         {[
           { label: "Model health",  href: `${MODEL_SERVER_URL}/health` },
-          { label: "Train status",  href: `${MODEL_SERVER_URL}/train/status` },
           { label: "API health",    href: `${API_URL}/health` },
         ].map((link) => (
           <a key={link.href} href={link.href} target="_blank" rel="noreferrer" className="block text-xs text-blue-600 hover:text-blue-800 hover:underline py-0.5">
@@ -728,7 +799,7 @@ export default function ChatPage() {
   const [loading, setLoading]           = useState(false);
   const [error, setError]               = useState<string | null>(null);
   const [health, setHealth]             = useState<ModelHealth | null>(null);
-  const [trainStatus, setTrainStatus]   = useState<TrainStatus | null>(null);
+  const [training, setTraining]         = useState<TrainingInfo | null>(null);
   const [qaCount, setQaCount]           = useState<QACount | null>(null);
   const [outputFiles, setOutputFiles]   = useState<OutputFile[]>([]);
   const [adapters, setAdapters]         = useState<Adapter[]>([{ id: "base", version: "Base model", path: "", is_base: true, trained_at: null }]);
@@ -755,12 +826,12 @@ export default function ChatPage() {
     } catch {}
   };
 
-  const fetchTrainStatus = async () => {
+  const fetchTraining = useCallback(async (sessionId: string) => {
     try {
-      const resp = await fetch(`${MODEL_SERVER_URL}/train/status`, { signal: AbortSignal.timeout(4000) });
-      if (resp.ok) setTrainStatus(await resp.json());
+      const resp = await fetch(`${API_URL}/sessions/${sessionId}/training`, { signal: AbortSignal.timeout(4000) });
+      if (resp.ok) setTraining(await resp.json());
     } catch {}
-  };
+  }, []);
 
   const fetchOutputFiles = async () => {
     try {
@@ -865,13 +936,19 @@ export default function ChatPage() {
   // ── Poll diagnostics ──
   useEffect(() => {
     const poll = async () => {
-      await Promise.all([fetchHealth(), fetchTrainStatus(), fetchOutputFiles(), fetchAdapters()]);
+      await Promise.all([fetchHealth(), fetchOutputFiles(), fetchAdapters()]);
       setLastPoll(new Date());
     };
     poll();
     const id = setInterval(poll, POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
+
+  // ── Load training progress when the session changes ──
+  useEffect(() => {
+    setTraining(null);
+    if (session) fetchTraining(session.id);
+  }, [session?.id, fetchTraining]);
 
   // ── Poll QA count when session is active ──
   useEffect(() => {
@@ -888,6 +965,7 @@ export default function ChatPage() {
 
     const id = setInterval(async () => {
       try {
+        fetchTraining(session.id);
         const resp = await fetch(`${API_URL}/sessions/${session.id}`);
         if (resp.ok) {
           const data: Session = await resp.json();
@@ -907,6 +985,19 @@ export default function ChatPage() {
     }, 3000);
     return () => clearInterval(id);
   }, [session?.id, session?.state]);
+
+  // ── Restart a failed training run ──
+  const restartTraining = useCallback(async () => {
+    if (!session) return;
+    try {
+      const resp = await fetch(`${API_URL}/sessions/${session.id}/restart-training`, { method: "POST" });
+      if (!resp.ok) { setError(`Could not restart training — ${await describeHttpError(resp)}`); return; }
+      setSession((prev) => prev ? { ...prev, state: "TRAINING" } : prev);
+      fetchTraining(session.id);
+    } catch {
+      setError("Could not restart training — check backend connection.");
+    }
+  }, [session, fetchTraining]);
 
   // ── Create session ──
   const createSession = useCallback(async (adapterId?: string) => {
@@ -1246,9 +1337,9 @@ export default function ChatPage() {
       const resp = await fetch(`${API_URL}/sessions/${session.id}/start-training`, { method: "POST" });
       if (resp.ok) {
         setSession((prev) => prev ? { ...prev, state: "TRAINING" } : prev);
-        setMessages((prev) => [...prev, { role: "system", content: "Training started! The model is being fine-tuned on your Q&A pairs. Check the diagnostics panel for progress." }]);
+        setMessages((prev) => [...prev, { role: "system", content: "Training started! The model is being fine-tuned on your Q&A pairs — progress is shown above." }]);
         await fetchSessions();
-        await fetchTrainStatus();
+        await fetchTraining(session.id);
       } else {
         const err = await resp.json().catch(() => ({ detail: "Unknown error" }));
         setError(`Could not start training: ${err.detail ?? resp.status}`);
@@ -1257,7 +1348,7 @@ export default function ChatPage() {
       setError("Could not start training — check backend connection.");
     }
     setStartingTraining(false);
-  }, [session, startingTraining, fetchSessions]);
+  }, [session, startingTraining, fetchSessions, fetchTraining]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -1389,6 +1480,9 @@ export default function ChatPage() {
             )}
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-lg">{error}</div>
+            )}
+            {training?.run && session && ["SLEEPING", "TRAINING", "EVALUATING", "DEPLOYING", "READY", "FAILED"].includes(session.state) && (
+              <TrainingProgressCard info={training} onRestart={restartTraining} />
             )}
             {messages.map((msg, i) => {
               if (msg.role === "system") {
@@ -1543,12 +1637,12 @@ export default function ChatPage() {
         <DiagnosticPanel
           session={session}
           health={health}
-          trainStatus={trainStatus}
+          training={training}
           lastPoll={lastPoll}
           selectedAdapter={selectedAdapter}
           adapters={adapters}
           qaCount={qaCount}
-          onRestartTraining={fetchTrainStatus}
+          onRestartTraining={restartTraining}
         />
       )}
 

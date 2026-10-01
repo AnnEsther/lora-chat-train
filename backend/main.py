@@ -1095,6 +1095,43 @@ async def start_training(
 # ── Health check ──────────────────────────────────────────────────────────────
 
 
+@app.get("/sessions/{session_id}/training")
+async def training_progress(
+    session_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Latest training run for the session with live progress written by the
+    worker (stage, step/total_steps, loss, epoch, eta_seconds, samples)."""
+    from models import TrainingRun
+
+    session = await _get_active_session(session_id, db)
+    result = await db.execute(
+        select(TrainingRun)
+        .where(TrainingRun.session_id == session_id)
+        .order_by(TrainingRun.created_at.desc())
+        .limit(1)
+    )
+    run = result.scalar_one_or_none()
+
+    def _iso(dt):
+        return dt.isoformat() if dt else None
+
+    return {
+        "session_state": session.state,
+        "failure_reason": session.failure_reason,
+        "run": None
+        if run is None
+        else {
+            "id": str(run.id),
+            "status": run.status,
+            "created_at": _iso(run.created_at),
+            "started_at": _iso(run.started_at),
+            "finished_at": _iso(run.finished_at),
+            "eval_passed": run.eval_passed,
+            "progress": (run.config or {}).get("progress") or {},
+        },
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
