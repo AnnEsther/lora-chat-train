@@ -31,6 +31,14 @@ interface QAPair {
   source_document_name?: string | null;
 }
 
+// Sent by the backend before each model call during Q&A generation (and every 10s while it runs)
+interface SynthProgress {
+  chunk: number;      // part of the passage being read (1-based)
+  chunks: number;
+  generated: number;  // pairs kept so far
+  requested: number;
+}
+
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
@@ -38,6 +46,8 @@ interface Message {
   streaming?: boolean;
   synthLoading?: boolean;
   segmentCount?: number;   // total segments the backend will process
+  synthStartedAt?: number; // ms timestamp when Q&A generation was requested
+  synthProgress?: SynthProgress;
   qaPairs?: QAPair[];
 }
 
@@ -393,6 +403,45 @@ function DiagnosticPanel({
   );
 }
 
+// ── Q&A generation status ─────────────────────────────────────────────────────
+
+function SynthStatus({ msg, isDocUpload }: { msg: Message; isDocUpload: boolean }) {
+  // Re-render every second so the elapsed time ticks
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const p = msg.synthProgress;
+  const generated = Math.max(p?.generated ?? 0, msg.qaPairs?.length ?? 0);
+  const requested = p?.requested ?? msg.segmentCount;
+  const pct = p ? Math.max(3, Math.round(((p.chunk - 1) / p.chunks) * 100)) : 3;
+  const text = p
+    ? `Generating Q&A — reading part ${p.chunk} of ${p.chunks}`
+    : isDocUpload ? "Extracting text from the document…" : "Preparing passage…";
+  const secs = msg.synthStartedAt ? Math.floor((Date.now() - msg.synthStartedAt) / 1000) : null;
+
+  return (
+    <div className="mt-2 rounded-xl border border-blue-100 bg-blue-50 px-3 py-2">
+      <div className="flex items-center gap-2 text-xs">
+        <span className="relative flex h-2 w-2 flex-shrink-0">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
+        </span>
+        <span className="text-blue-700 font-medium">{text}</span>
+        <span className="flex-1" />
+        {requested !== undefined && <span className="text-blue-600 tabular-nums">{generated} / {requested} pairs</span>}
+        {secs !== null && <span className="text-gray-500 tabular-nums">{duration(secs)}</span>}
+      </div>
+      <div className="h-1.5 mt-2 rounded-full bg-white overflow-hidden">
+        <div className="h-full bg-blue-500 transition-all duration-700" style={{ width: `${pct}%` }} />
+      </div>
+      {p && <p className="text-[11px] text-gray-500 mt-1">Each part takes up to a minute — pairs appear below as they are ready.</p>}
+    </div>
+  );
+}
+
 // ── Inline QA deck ────────────────────────────────────────────────────────────
 
 function InlineDeck({
@@ -559,7 +608,7 @@ function InlineDeck({
 
           {/* Dot indicators */}
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            {Array.from({ length: totalCards }).map((_, di) => (
+            {totalCards <= 24 && Array.from({ length: totalCards }).map((_, di) => (
               <button
                 key={di}
                 onClick={() => di < pairs.length && goTo(di, di > cardIdx ? "left" : "right")}
@@ -1085,6 +1134,7 @@ export default function ChatPage() {
       role: "user",
       content: `[Document: ${file.name}]`,
       synthLoading: true,
+      synthStartedAt: Date.now(),
     };
     setMessages((prev) => [...prev, docMsgObj]);
 
@@ -1122,6 +1172,15 @@ export default function ChatPage() {
                 const copy = [...prev];
                 const lastIdx = copy.length - 1;
                 copy[lastIdx] = { ...copy[lastIdx], segmentCount: event.segment_count ?? 1, qaPairs: [] };
+                return copy;
+              });
+            }
+
+            if (event.type === "progress") {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], synthProgress: event as SynthProgress };
                 return copy;
               });
             }
@@ -1190,7 +1249,7 @@ export default function ChatPage() {
     setError(null);
 
     // Add user message with a placeholder synthesis loading indicator
-    const userMsgObj: Message = { role: "user", content: userMsg, synthLoading: true };
+    const userMsgObj: Message = { role: "user", content: userMsg, synthLoading: true, synthStartedAt: Date.now() };
     setMessages((prev) => [...prev, userMsgObj]);
 
     // Handle /sleep command
@@ -1264,8 +1323,15 @@ export default function ChatPage() {
               });
             }
 
-            // heartbeat — keep-alive tick, no UI change needed
-            // if (event.type === "heartbeat") { /* no-op */ }
+            if (event.type === "progress") {
+              setMessages((prev) => {
+                const copy = [...prev];
+                const lastIdx = copy.length - 1;
+                copy[lastIdx] = { ...copy[lastIdx], synthProgress: event as SynthProgress };
+                return copy;
+              });
+            }
+
 
             // One pair arrived — append it immediately so the card appears now
             if (event.type === "qa_pair" && event.pair) {
@@ -1507,6 +1573,9 @@ export default function ChatPage() {
                       )}
                     </div>
 
+                    {/* Generation status — shown for the whole run, not just before the first pair */}
+                    {msg.synthLoading && <SynthStatus msg={msg} isDocUpload={isDocUpload} />}
+
                     {/* Inline QA deck */}
                     {(msg.qaPairs !== undefined || msg.synthLoading) && session && (
                       <InlineDeck
@@ -1518,21 +1587,7 @@ export default function ChatPage() {
                         onUpdate={(qaId, updates) => handleQAUpdate(msg.id, qaId, updates)}
                         onDelete={(qaId) => handleQADelete(msg.id, qaId)}
                       />
-                    )}
-
-                    {/* Pre-start loading indicator */}
-                    {msg.synthLoading && msg.qaPairs === undefined && (
-                      <div className="flex items-center gap-2 mt-1 pl-1">
-                        <span className="relative flex h-2 w-2 flex-shrink-0">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                          <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-                        </span>
-                        <span className="text-xs text-blue-500 font-medium">
-                          {isDocUpload ? "Extracting & analysing document…" : "Analysing passage…"}
-                        </span>
-                      </div>
-                    )}
-                  </div>
+                    )}                  </div>
                 );
               }
               // assistant messages (from /sleep ack etc) should not normally appear in new flow

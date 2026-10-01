@@ -487,7 +487,9 @@ async def _synthesize_and_stream(
         source_document_name: Original filename when sourced from an upload.
 
     SSE events emitted:
-      {"type": "start", "segment_count": N}   — how many segments will be processed
+      {"type": "start", "segment_count": N}   — how many pairs were requested
+      {"type": "progress", "chunk", "chunks", "generated", "requested"}
+                                              — before each model call, repeated every 10s
       {"type": "heartbeat"}                   — keep-alive between model calls
       {"type": "qa_pair", "pair": {...}}      — one pair, streamed as soon as it is ready
       {"type": "qa_count", ...}               — updated totals after all pairs are done
@@ -519,13 +521,28 @@ async def _synthesize_and_stream(
                 remaining = wanted - len(asked)
                 if remaining <= 0:
                     break
+                progress_event = json.dumps(
+                    {
+                        "type": "progress",
+                        "chunk": i + 1,
+                        "chunks": len(chunks),
+                        "generated": generated,
+                        "requested": num_qa,
+                    }
+                )
+                yield f"data: {progress_event}\n\n"
+                future = loop.run_in_executor(
+                    None,
+                    lambda c=chunk, n=min(remaining, QA_PAIRS_PER_CALL), a=list(
+                        asked
+                    ): synthesize_pairs_from_chunk(c, n, a),
+                )
+                # A model call can take a minute; re-send progress every 10s so the
+                # UI shows it's still working (and proxies don't drop the stream)
+                while not (await asyncio.wait({future}, timeout=10))[0]:
+                    yield f"data: {progress_event}\n\n"
                 try:
-                    pairs = await loop.run_in_executor(
-                        None,
-                        lambda c=chunk, n=min(remaining, QA_PAIRS_PER_CALL), a=list(
-                            asked
-                        ): synthesize_pairs_from_chunk(c, n, a),
-                    )
+                    pairs = future.result()
                 except Exception as exc:
                     logger.warning(
                         f"chunk_synthesis_failed chunk={i}: {type(exc).__name__}: {exc}",
