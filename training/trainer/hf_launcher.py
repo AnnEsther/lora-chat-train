@@ -363,8 +363,18 @@ def train_local(config: dict, dataset_path: str | Path = "", progress_cb=None) -
         token=os.environ.get("HF_TOKEN", ""),
         trust_remote_code=True,
     )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # The pad token must NOT be the EOS token: the LM collator masks every pad id
+    # out of the labels, so pad == eos hides the end of each answer and the model
+    # never learns to stop — it keeps appending extra question/answer pairs.
+    if tokenizer.pad_token is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
+        if tokenizer.unk_token is not None and tokenizer.unk_token_id != tokenizer.eos_token_id:
+            tokenizer.pad_token = tokenizer.unk_token
+        else:
+            logger.warning(
+                "pad_token_is_eos — no separate token available; the model may not learn to stop"
+            )
+            tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"  # recommended for fp16 SFT (avoids overflow)
 
     # ── Load model with 4-bit quantization ───────────────────────────────────
     logger.info("loading_model", extra={"model": base_model})
