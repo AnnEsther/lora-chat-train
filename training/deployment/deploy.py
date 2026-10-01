@@ -158,7 +158,7 @@ class DeploymentManager:
         try:
             resp = requests.post(
                 f"{MODEL_SERVER_URL}/reload_adapter",
-                json={"adapter_dir": str(PRODUCTION_ADAPTER_DIR)},
+                json={"adapter_dir": str(PRODUCTION_ADAPTER_DIR), "force": True},
                 timeout=60,
             )
             resp.raise_for_status()

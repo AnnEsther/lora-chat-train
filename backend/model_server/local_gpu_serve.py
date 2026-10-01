@@ -135,17 +135,31 @@ def _load_base_model() -> None:
     logger.info("Base model loaded")
 
 
-def _load_adapter(adapter_dir: Path) -> None:
+def _detach_adapter() -> None:
+    """Remove the active LoRA adapter, restoring the untouched base model.
+
+    Must be unload(), NOT merge_and_unload(): merging bakes the adapter into the
+    base weights, so every reload stacks the adapter again and the model degrades
+    into repeating a single token. Caller must hold _model_lock.
+    """
+    global _model, _adapter_path
+    if isinstance(_model, PeftModel):
+        logger.info("Unloading existing adapter")
+        _model = _model.unload()
+        _model.eval()
+    _adapter_path = None
+
+
+def _load_adapter(adapter_dir: Path, force: bool = False) -> None:
     global _model, _adapter_path
     if not adapter_dir.exists():
         logger.warning(f"Adapter dir not found: {adapter_dir} — using base model")
         return
     adapter_path_str = str(adapter_dir.resolve())
     with _model_lock:
-        if isinstance(_model, PeftModel):
-            logger.info("Unloading existing adapter")
-            _model = _model.merge_and_unload()
-            _model.eval()
+        if not force and _adapter_path == adapter_path_str and isinstance(_model, PeftModel):
+            return  # already active — Glyph chat requests a reload on every message
+        _detach_adapter()
         logger.info(f"Loading adapter: {adapter_path_str}")
         _model = PeftModel.from_pretrained(_model, adapter_path_str, is_trainable=False)
         _model.eval()
@@ -228,9 +242,7 @@ def _run_training(run_id: str, dataset_jsonl_path: Path) -> None:
 
         # ── Unload inference adapter before training ───────────────────────────
         with _model_lock:
-            if isinstance(_model, PeftModel):
-                _model = _model.merge_and_unload()
-                _model.eval()
+            _detach_adapter()
 
         # ── Load fresh trainable model ─────────────────────────────────────────
         train_model = AutoModelForCausalLM.from_pretrained(
@@ -412,6 +424,7 @@ class TrainRequest(BaseModel):
 
 class ReloadRequest(BaseModel):
     adapter_dir: str
+    force: bool = False  # reload even if this path is already active (deploys overwrite in place)
 
 
 @app.post("/chat")
@@ -518,17 +531,13 @@ async def train_status() -> dict:
 async def reload_adapter(req: ReloadRequest) -> dict:
     if req.adapter_dir == "base":
         with _model_lock:
-            global _model, _adapter_path
-            if _model is not None and isinstance(_model, PeftModel):
-                _model = _model.merge_and_unload()
-                _model.eval()
-            _adapter_path = None
+            _detach_adapter()
         return {"status": "ok", "adapter_dir": "base (no adapter)"}
     adapter_path = Path(req.adapter_dir)
     if not adapter_path.exists():
         raise HTTPException(404, f"Adapter dir not found: {req.adapter_dir}")
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _load_adapter, adapter_path)
+    await loop.run_in_executor(None, _load_adapter, adapter_path, req.force)
     return {"status": "ok", "adapter_dir": str(adapter_path)}
 
 
