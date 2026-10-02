@@ -1482,6 +1482,42 @@ export default function ChatPage() {
               </div>
             )}
 
+            {/* Download this session's Q&A pairs */}
+            {session && (
+              <details className="relative">
+                <summary
+                  className={`list-none text-xs px-3 py-1.5 rounded-md border cursor-pointer select-none ${
+                    qaCount?.total_count
+                      ? "border-gray-300 bg-white hover:bg-gray-50 text-gray-700"
+                      : "border-gray-200 bg-gray-50 text-gray-400 pointer-events-none"
+                  }`}
+                  title={qaCount?.total_count ? `Download this session's ${qaCount.total_count} Q&A pairs` : "No Q&A pairs in this session yet"}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-3.5 h-3.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Q&A
+                  </span>
+                </summary>
+                <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1">
+                  {[
+                    { format: "jsonl", label: "Training format (.jsonl)", hint: "Exactly what the model trains on" },
+                    { format: "csv",   label: "Spreadsheet (.csv)",       hint: "For review in Excel / Sheets" },
+                  ].map((o) => (
+                    <a
+                      key={o.format}
+                      href={`${API_URL}/sessions/${session.id}/qa/export?format=${o.format}`}
+                      download
+                      onClick={(e) => { (e.currentTarget.closest("details") as HTMLDetailsElement | null)?.removeAttribute("open"); }}
+                      className="block px-3 py-1.5 hover:bg-gray-50"
+                    >
+                      <span className="block text-xs text-gray-700">{o.label}</span>
+                      <span className="block text-[11px] text-gray-400">{o.hint}</span>
+                    </a>
+                  ))}
+                </div>
+              </details>
+            )}
+
             {/* Start Training button */}
             {session && (
               <div className="flex items-center gap-1">

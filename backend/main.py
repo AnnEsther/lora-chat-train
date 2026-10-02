@@ -24,7 +24,7 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -856,6 +856,76 @@ async def get_session_qa(
         }
         for qa in qa_items
     ]
+
+
+@app.get("/sessions/{session_id}/qa/export")
+async def export_session_qa(
+    session_id: uuid.UUID,
+    format: str = Query(default="jsonl", pattern="^(jsonl|csv)$"),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """Download every Q&A pair of a session as a file.
+
+    jsonl — the training format: {"messages": [system, user, assistant]} per
+            line, with the same system prompt build_dataset trains with.
+    csv   — one row per pair with validation/source details, for review in a
+            spreadsheet (UTF-8 with BOM so Excel shows non-ASCII correctly).
+    """
+    import csv
+    import io
+
+    from models import SynthesizedQA
+    from training.datasets.dataset_writer import DatasetWriter
+
+    session = await _get_active_session(session_id, db)
+    result = await db.execute(
+        select(SynthesizedQA)
+        .where(SynthesizedQA.session_id == session_id)
+        .order_by(SynthesizedQA.created_at)
+    )
+    pairs = result.scalars().all()
+    stem = f"qa_{str(session_id)[:8]}_{datetime.now(timezone.utc):%Y%m%d}"
+
+    if format == "jsonl":
+        writer = DatasetWriter(
+            system_prompt=session.system_prompt or session.training_system_prompt
+        )
+        body = writer.write_jsonl(
+            [
+                {
+                    "conversation": [
+                        {"role": "user", "content": qa.question},
+                        {"role": "assistant", "content": qa.answer},
+                    ]
+                }
+                for qa in pairs
+            ]
+        )
+        body = body + "\n" if body else body
+        media_type, filename = "application/x-ndjson", f"{stem}.jsonl"
+    else:
+        buffer = io.StringIO()
+        out = csv.writer(buffer)
+        out.writerow(["question", "answer", "validated", "edited", "source", "created_at"])
+        for qa in pairs:
+            out.writerow(
+                [
+                    qa.question,
+                    qa.answer,
+                    qa.validated,
+                    qa.edited,
+                    qa.source_document_name or "chat passage",
+                    qa.created_at.isoformat() if qa.created_at else "",
+                ]
+            )
+        body = "﻿" + buffer.getvalue()
+        media_type, filename = "text/csv; charset=utf-8", f"{stem}.csv"
+
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.put("/sessions/{session_id}/qa/{qa_id}")
