@@ -23,7 +23,7 @@ from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Request
+from fastapi import Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -1406,6 +1406,109 @@ async def _adapter_system_prompt(run_id: Optional[str], db: AsyncSession) -> Opt
     except Exception as exc:
         logger.warning("adapter_system_prompt_lookup_failed", extra={"error": str(exc)})
         return None
+
+
+# ── Saved Glyph Chat conversations (admin) ────────────────────────────────────
+# Lists EVERY player's conversations, so it is not protected by CHAT_API_KEY
+# (that key ships in the Glyph Chat browser bundle). The Glyph Chat container's
+# nginx adds GLYPH_ADMIN_KEY server-side for /glyph/api/*, which only exists
+# behind the site password. Unset GLYPH_ADMIN_KEY = endpoints disabled.
+
+
+async def _verify_admin_key(x_admin_key: str = Header(default="")):
+    import secrets
+
+    admin_key = os.environ.get("GLYPH_ADMIN_KEY", "")
+    if not admin_key or not secrets.compare_digest(x_admin_key, admin_key):
+        raise HTTPException(status_code=403, detail="Admin key required")
+
+
+@app.get("/glyph/conversations", dependencies=[Depends(_verify_admin_key)])
+async def list_glyph_conversations(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Most recently active conversations first, with a preview of each."""
+    from sqlalchemy import func
+    from models import GlyphConversation, GlyphMessage
+
+    def _per_conversation(column, *where, order=None):
+        q = select(column).where(
+            GlyphMessage.conversation_id == GlyphConversation.id, *where
+        )
+        if order is not None:
+            q = q.order_by(order).limit(1)
+        return q.correlate(GlyphConversation).scalar_subquery()
+
+    message_count = _per_conversation(func.count(GlyphMessage.id))
+    preview = _per_conversation(
+        GlyphMessage.content,
+        GlyphMessage.role == "user",
+        order=GlyphMessage.created_at.asc(),
+    )
+    last_adapter = _per_conversation(
+        GlyphMessage.adapter_id, order=GlyphMessage.created_at.desc()
+    )
+    result = await db.execute(
+        select(
+            GlyphConversation.id,
+            GlyphConversation.created_at,
+            GlyphConversation.updated_at,
+            message_count.label("message_count"),
+            preview.label("preview"),
+            last_adapter.label("last_adapter_id"),
+        )
+        .where(message_count > 0)
+        .order_by(GlyphConversation.updated_at.desc())
+        .limit(limit)
+    )
+    return {
+        "conversations": [
+            {
+                "id": str(row.id),
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat(),
+                "message_count": row.message_count,
+                "preview": (row.preview or "")[:200],
+                "last_adapter_id": row.last_adapter_id,
+            }
+            for row in result
+        ]
+    }
+
+
+@app.get(
+    "/glyph/conversations/{conversation_id}", dependencies=[Depends(_verify_admin_key)]
+)
+async def get_glyph_conversation(
+    conversation_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Every saved message of one conversation, oldest first."""
+    from models import GlyphConversation, GlyphMessage
+
+    conversation = await db.get(GlyphConversation, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    result = await db.execute(
+        select(GlyphMessage)
+        .where(GlyphMessage.conversation_id == conversation_id)
+        .order_by(GlyphMessage.created_at)
+    )
+    return {
+        "id": str(conversation.id),
+        "created_at": conversation.created_at.isoformat(),
+        "updated_at": conversation.updated_at.isoformat(),
+        "messages": [
+            {
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat(),
+                "adapter_id": m.adapter_id,
+                "error": m.error,
+            }
+            for m in result.scalars().all()
+        ],
+    }
 
 
 @app.post("/chat/direct", dependencies=[Depends(_verify_api_key)])

@@ -19,5 +19,6 @@ RUN npm run build
 # ── Stage 2: serve with nginx ─────────────────────────────────────────────────
 FROM nginx:alpine AS runner
 COPY --from=builder /app/out /usr/share/nginx/html/glyph
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Rendered to /etc/nginx/conf.d/default.conf at startup (fills ${GLYPH_ADMIN_KEY})
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 EXPOSE 80

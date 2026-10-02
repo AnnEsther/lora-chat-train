@@ -105,17 +105,41 @@ The server keeps the history: the model sees the last `GLYPH_HISTORY_MESSAGES` (
 saved messages of the conversation, and ignores any history the client sends, so a player
 can't fake earlier Glyph replies.
 
-### Reading them (on the server)
+### Reading them in /glyph
+
+The 🕘 button in the Glyph Chat dialog lists **everyone's** saved conversations, newest first,
+with the first question, message count and last activity. Clicking one loads it, and the next
+message continues that conversation.
+
+How it's protected (it exposes every conversation, so this matters):
+
+- The browser calls `/glyph/api/conversations[/<id>]`. That path is under the host nginx's
+  `/glyph` location, so the site password is required.
+- The Glyph Chat container's own nginx (`glyph_chat/nginx.conf`) forwards these calls to the
+  backend's `/glyph/conversations` and adds `X-Admin-Key: $GLYPH_ADMIN_KEY` server-side. The
+  key is never in the browser bundle (unlike `NEXT_PUBLIC_API_KEY`).
+- The backend refuses those endpoints without the admin key. If `GLYPH_ADMIN_KEY` is unset,
+  they are disabled (403) and the list shows an error.
+- The container's port is bound to `127.0.0.1:3001`, so the proxy can't be reached directly
+  on the server's public IP, bypassing the password.
+
+Setup (once): add a random key to `.env`, letters and digits only, then rebuild:
+
+```bash
+echo "GLYPH_ADMIN_KEY=$(openssl rand -hex 32)" >> .env
+docker compose build glyph_chat && docker compose up -d backend glyph_chat
+```
+
+> This lists every player's conversation to anyone with the site password. Before real players
+> use `/glyph`, switch to showing only the player's own conversations.
+
+### Reading them on the server
 
 ```bash
 make glyph-chats                    # 20 most recent conversations with message counts
 make glyph-chat ID=<conversation>   # one conversation, in order
 make glyph-export                   # every message → glyph_chats_<date>.csv (git-ignored)
 ```
-
-There is deliberately **no web endpoint** for reading saved chats. `/api` isn't behind the site
-password, and the Glyph Chat API key is visible in the browser, so an endpoint would expose
-every player's conversation.
 
 ### Privacy
 

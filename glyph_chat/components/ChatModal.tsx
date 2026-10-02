@@ -7,11 +7,18 @@ import DialogActions from '@mui/material/DialogActions';
 import TextField from '@mui/material/TextField';
 import IconButton from '@mui/material/IconButton';
 import Box from '@mui/material/Box';
+import Typography from '@mui/material/Typography';
+import CircularProgress from '@mui/material/CircularProgress';
+import List from '@mui/material/List';
+import ListItemButton from '@mui/material/ListItemButton';
+import ListItemText from '@mui/material/ListItemText';
 import SendIcon from '@mui/icons-material/Send';
 import CloseIcon from '@mui/icons-material/Close';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import HistoryIcon from '@mui/icons-material/History';
 import MessageBubble, { Message } from './MessageBubble';
-import { sendMessage } from '@/lib/chat';
+import { fetchConversation, fetchConversations, sendMessage } from '@/lib/chat';
+import type { ConversationSummary, SavedMessage } from '@/lib/types';
 
 interface ChatModalProps {
   open: boolean;
@@ -46,12 +53,40 @@ function storeConversation(conversation: StoredConversation | null): void {
   } catch {}
 }
 
+/** Saved server messages → chat bubbles (a reply that never arrived is marked). */
+function toBubbles(saved: SavedMessage[]): Message[] {
+  return [
+    GREETING,
+    ...saved.map((m): Message =>
+      m.role === 'user'
+        ? { role: 'user', text: m.content }
+        : { role: 'glyph', text: m.content || (m.error ? '(no reply)' : '') },
+    ),
+  ];
+}
+
+function timeAgo(iso: string): string {
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)} h ago`;
+  if (secs < 7 * 86400) return `${Math.floor(secs / 86400)} d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) {
   const [messages, setMessages] = useState<Message[]>([GREETING]);
   const [input, setInput]     = useState('');
   const [streaming, setStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Previous conversations view
+  const [view, setView] = useState<'chat' | 'history'>('chat');
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [openingId, setOpeningId] = useState<string | null>(null);
 
   // Restore the previous conversation once on mount (localStorage is client-only)
   useEffect(() => {
@@ -76,6 +111,39 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
     storeConversation(null);
     setConversationId(null);
     setMessages([GREETING]);
+    setView('chat');
+  };
+
+  const toggleHistory = async () => {
+    if (streaming) return;
+    if (view === 'history') { setView('chat'); return; }
+    setView('history');
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      setConversations(await fetchConversations());
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Could not load conversations.');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  // Load a saved conversation; the next message continues it on the server
+  const openConversation = async (id: string) => {
+    if (openingId) return;
+    setOpeningId(id);
+    setHistoryError(null);
+    try {
+      const saved = await fetchConversation(id);
+      setMessages(toBubbles(saved.messages));
+      setConversationId(saved.id);
+      setView('chat');
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : 'Could not open that conversation.');
+    } finally {
+      setOpeningId(null);
+    }
   };
 
   const handleSend = async () => {
@@ -211,14 +279,32 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
         <RestartAltIcon fontSize="small" />
       </IconButton>
 
-      {/* Message list */}
+      {/* Previous conversations */}
+      <IconButton
+        onClick={toggleHistory}
+        disabled={streaming}
+        size="small"
+        aria-label="previous conversations"
+        title={view === 'history' ? 'Back to chat' : 'Previous conversations'}
+        sx={{
+          position: 'absolute',
+          top: 8,
+          right: 72,
+          zIndex: 10,
+          color: view === 'history' ? 'rgba(192,132,252,0.95)' : 'rgba(255,255,255,0.5)',
+          '&:hover': { color: 'rgba(255,255,255,0.9)' },
+        }}
+      >
+        <HistoryIcon fontSize="small" />
+      </IconButton>
+
+      {/* Message list / conversation list */}
       <DialogContent
         sx={{
           flex: 1,
           overflowY: 'auto',
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'center',
           px: 2,
           pt: 4,
           pb: 1,
@@ -228,12 +314,62 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
           '&::-webkit-scrollbar-thumb': { background: 'rgba(192,132,252,0.2)', borderRadius: '2px' },
         }}
       >
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-          {messages.map((msg, i) => (
-            <MessageBubble key={i} message={msg} />
-          ))}
-          <div ref={bottomRef} />
-        </Box>
+        {view === 'chat' ? (
+          // my: auto centres a short chat but, unlike justify-content: center,
+          // still lets a long one scroll all the way to the top
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0, my: 'auto' }}>
+            {messages.map((msg, i) => (
+              <MessageBubble key={i} message={msg} />
+            ))}
+            <div ref={bottomRef} />
+          </Box>
+        ) : (
+          <Box>
+            <Typography variant="subtitle2" sx={{ color: 'rgba(255,255,255,0.7)', mb: 1, px: 1 }}>
+              Previous conversations
+            </Typography>
+            {historyLoading && (
+              <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+                <CircularProgress size={24} />
+              </Box>
+            )}
+            {historyError && (
+              <Typography variant="body2" sx={{ color: '#f87171', px: 1, py: 1 }}>
+                {historyError}
+              </Typography>
+            )}
+            {!historyLoading && !historyError && conversations.length === 0 && (
+              <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.5)', px: 1, py: 2 }}>
+                No saved conversations yet.
+              </Typography>
+            )}
+            <List dense disablePadding>
+              {conversations.map((c) => (
+                <ListItemButton
+                  key={c.id}
+                  onClick={() => openConversation(c.id)}
+                  disabled={openingId !== null}
+                  selected={c.id === conversationId}
+                  sx={{
+                    borderRadius: 2,
+                    mb: 0.5,
+                    '&.Mui-selected': { backgroundColor: 'rgba(130,58,136,0.35)' },
+                  }}
+                >
+                  <ListItemText
+                    primary={c.preview || '(no question)'}
+                    secondary={`${c.message_count} messages · ${timeAgo(c.updated_at)}${c.id === conversationId ? ' · current' : ''}`}
+                    slotProps={{
+                      primary: { noWrap: true, sx: { color: 'rgba(255,255,255,0.9)' } },
+                      secondary: { sx: { color: 'rgba(255,255,255,0.5)' } },
+                    }}
+                  />
+                  {openingId === c.id && <CircularProgress size={16} sx={{ ml: 1 }} />}
+                </ListItemButton>
+              ))}
+            </List>
+          </Box>
+        )}
       </DialogContent>
 
       <DialogActions sx={{ px: 2, py: 1.5, gap: 1, backgroundColor: 'transparent' }}>
@@ -244,7 +380,7 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          disabled={streaming}
+          disabled={streaming || view === 'history'}
           multiline
           maxRows={3}
           sx={{
@@ -253,7 +389,7 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
         />
         <IconButton
           onClick={handleSend}
-          disabled={streaming || !input.trim()}
+          disabled={streaming || view === 'history' || !input.trim()}
           color="primary"
           aria-label="send"
         >

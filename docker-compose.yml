@@ -107,8 +107,16 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         NEXT_PUBLIC_API_KEY: ${NEXT_PUBLIC_API_KEY}
         NEXT_PUBLIC_BASE_PATH: /glyph
+    environment:
+      # Server-side only (nginx adds it to /glyph/api/* → backend); never a
+      # NEXT_PUBLIC_ value. Empty = conversation list disabled (403).
+      GLYPH_ADMIN_KEY: ${GLYPH_ADMIN_KEY:-}
+    depends_on:
+      - backend
     ports:
-      - "3001:80"
+      # localhost only: /glyph/api/* returns every conversation, so it must
+      # only be reachable through the host nginx (behind the site password)
+      - "127.0.0.1:3001:80"
     restart: unless-stopped
   # ── Frontend ────────────────────────────────────────────────────────────────
   frontend:

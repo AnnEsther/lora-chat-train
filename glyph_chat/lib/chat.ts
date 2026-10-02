@@ -1,7 +1,27 @@
-import type { Adapter } from './types';
+import type { Adapter, ConversationSummary, SavedConversation } from './types';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 const API_KEY  = process.env.NEXT_PUBLIC_API_KEY  ?? '';
+// Saved conversations go through this app's own nginx (/glyph/api/*), which adds
+// the admin key server-side and sits behind the site password — same origin, so
+// the browser sends the site credentials automatically.
+const GLYPH_API = `${process.env.NEXT_PUBLIC_BASE_PATH ?? '/glyph'}/api`;
+
+// ---------------------------------------------------------------------------
+// Saved conversations (everyone's)
+// ---------------------------------------------------------------------------
+export async function fetchConversations(): Promise<ConversationSummary[]> {
+  const resp = await fetch(`${GLYPH_API}/conversations`);
+  if (!resp.ok) throw new Error(`fetchConversations: ${resp.status} ${resp.statusText}`);
+  const data = await resp.json();
+  return data.conversations as ConversationSummary[];
+}
+
+export async function fetchConversation(id: string): Promise<SavedConversation> {
+  const resp = await fetch(`${GLYPH_API}/conversations/${encodeURIComponent(id)}`);
+  if (!resp.ok) throw new Error(`fetchConversation: ${resp.status} ${resp.statusText}`);
+  return (await resp.json()) as SavedConversation;
+}
 
 // ---------------------------------------------------------------------------
 // Fetch available adapters
