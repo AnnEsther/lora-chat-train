@@ -18,6 +18,7 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File, Form
@@ -1262,7 +1263,101 @@ async def get_session_turns(
 class DirectChatRequest(BaseModel):
     message: str
     adapter_id: str = "base"
-    history: list[dict] = []  # [{"role": "user/assistant", "content": "..."}]
+    # Returned in the first SSE event; send it back to continue the conversation
+    conversation_id: Optional[str] = None
+    # Ignored: history now comes from the saved conversation, so a client can't
+    # inject fake earlier Glyph replies. Kept so older clients don't get a 422.
+    history: list[dict] = []
+
+
+# How many earlier messages (user + Glyph) the model sees; all are still saved
+GLYPH_HISTORY_MESSAGES = int(os.environ.get("GLYPH_HISTORY_MESSAGES", 20))
+
+
+async def _glyph_conversation(
+    conversation_id: Optional[str], db: AsyncSession
+) -> tuple[uuid.UUID, list[dict]]:
+    """Return (conversation id, recent history) — continuing the saved
+    conversation if the id is known, otherwise starting a new one."""
+    from models import GlyphConversation, GlyphMessage
+
+    conversation = None
+    if conversation_id:
+        try:
+            conversation = await db.get(GlyphConversation, uuid.UUID(conversation_id))
+        except ValueError:
+            conversation = None
+    if conversation is None:
+        conversation = GlyphConversation(id=uuid.uuid4())
+        db.add(conversation)
+        await db.commit()
+        return conversation.id, []
+
+    result = await db.execute(
+        select(GlyphMessage)
+        .where(
+            GlyphMessage.conversation_id == conversation.id,
+            GlyphMessage.content != "",
+        )
+        .order_by(GlyphMessage.created_at.desc())
+        .limit(GLYPH_HISTORY_MESSAGES)
+    )
+    # The model's chat template needs strictly alternating turns that start with
+    # the user; the new message is appended as a user turn, so end on the Glyph.
+    # A failed/interrupted reply leaves two user turns in a row — keep the later.
+    history: list[dict] = []
+    for m in reversed(result.scalars().all()):
+        turn = {"role": m.role, "content": m.content}
+        if history and history[-1]["role"] == m.role:
+            history[-1] = turn
+        else:
+            history.append(turn)
+    while history and history[0]["role"] != "user":
+        history.pop(0)
+    if history and history[-1]["role"] == "user":
+        history.pop()
+    return conversation.id, history
+
+
+async def _save_glyph_message(
+    conversation_id: uuid.UUID,
+    role: str,
+    content: str,
+    adapter_id: Optional[str],
+    adapter_run_id: Optional[str],
+    error: Optional[str] = None,
+) -> None:
+    """Persist one Glyph Chat message. Uses its own DB session because it also
+    runs from the streaming generator, after the request's session is closed."""
+    from database import AsyncSessionLocal
+    from models import GlyphConversation, GlyphMessage
+
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(
+                GlyphMessage(
+                    id=uuid.uuid4(),
+                    conversation_id=conversation_id,
+                    role=role,
+                    content=content,
+                    adapter_id=adapter_id,
+                    adapter_run_id=adapter_run_id,
+                    error=error,
+                )
+            )
+            conversation = await db.get(GlyphConversation, conversation_id)
+            if conversation:
+                conversation.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+    except Exception as exc:
+        # Losing a saved message must never break the chat — but make it loud
+        logger.error(f"glyph_message_save_failed conversation={conversation_id}: {exc!r}")
+        _notify_in_background(
+            backend_error,
+            "Glyph Chat: saving a message",
+            f"{type(exc).__name__}: {exc}"[:300],
+            str(conversation_id)[:8],
+        )
 
 
 async def _verify_api_key(x_api_key: str = Header(...)):
@@ -1318,8 +1413,13 @@ async def direct_chat(
     request: DirectChatRequest, db: AsyncSession = Depends(get_db)
 ) -> StreamingResponse:
     """
-    Stateless streaming chat for Glyph Chat.
-    No session created, no token budget, no training trigger.
+    Streaming chat for Glyph Chat. No training session, no token budget, no
+    training trigger.
+
+    Every message is saved (glyph_conversations / glyph_messages). The model sees
+    the last GLYPH_HISTORY_MESSAGES saved messages of the conversation; history
+    sent by the client is ignored. The first SSE event is
+    {"type": "conversation", "id": ...} — send that id back to continue.
 
     The system prompt matches the one the adapter was trained with (its session's
     system_prompt), falling back to GLYPH_SYSTEM_PROMPT, then the client default.
@@ -1363,18 +1463,46 @@ async def direct_chat(
         "GLYPH_SYSTEM_PROMPT"
     )
 
-    messages = request.history + [{"role": "user", "content": request.message}]
+    conversation_id, history = await _glyph_conversation(request.conversation_id, db)
+    await _save_glyph_message(
+        conversation_id, "user", request.message, request.adapter_id, adapter_run_id
+    )
+
+    messages = history + [{"role": "user", "content": request.message}]
     model_client: ModelClient = app.state.model_client
 
     async def stream_gen():
+        import asyncio
+
+        yield f"data: {json.dumps({'type': 'conversation', 'id': str(conversation_id)})}\n\n"
+        reply: list[str] = []
+        error: Optional[str] = None
+        finished = False
         try:
             async for chunk in model_client.stream(messages, system_prompt=system_prompt):
+                reply.append(chunk)
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+            finished = True
         except Exception as exc:
-            logger.error("direct_chat_stream_error", extra={"error": str(exc)})
+            error = f"{type(exc).__name__}: {exc}"[:300]
+            logger.error(f"direct_chat_stream_error conversation={conversation_id}: {error}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
         finally:
-            yield f"data: {json.dumps({'type': 'end'})}\n\n"
+            # Runs even if the player closes the page mid-reply; shield the save
+            # from the cancellation so the partial reply is still recorded
+            if not finished and error is None:
+                error = "reply interrupted (client disconnected)"
+            await asyncio.shield(
+                _save_glyph_message(
+                    conversation_id,
+                    "assistant",
+                    "".join(reply),
+                    request.adapter_id,
+                    adapter_run_id,
+                    error,
+                )
+            )
+        yield f"data: {json.dumps({'type': 'end'})}\n\n"
 
     return StreamingResponse(
         stream_gen(),

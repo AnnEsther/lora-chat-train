@@ -1,3 +1,6 @@
+# Glyph Chat exports (make glyph-export) — contain player messages
+glyph_chats_*.csv
+
 # Python
 __pycache__/
 *.pyc

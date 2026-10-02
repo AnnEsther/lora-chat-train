@@ -9,9 +9,9 @@ import IconButton from '@mui/material/IconButton';
 import Box from '@mui/material/Box';
 import SendIcon from '@mui/icons-material/Send';
 import CloseIcon from '@mui/icons-material/Close';
+import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import MessageBubble, { Message } from './MessageBubble';
 import { sendMessage } from '@/lib/chat';
-import type { HistoryItem } from '@/lib/types';
 
 interface ChatModalProps {
   open: boolean;
@@ -19,31 +19,70 @@ interface ChatModalProps {
   adapterId: string;
 }
 
+const GREETING: Message = { role: 'glyph', text: 'Hello. I am Glyph. What would you like to know?' };
+
+// The conversation survives closing the dialog and reloading the page. The
+// server saves every message; this only restores what the player sees.
+const STORAGE_KEY = 'glyph_conversation';
+
+interface StoredConversation {
+  conversationId: string | null;
+  messages: Message[];
+}
+
+function loadConversation(): StoredConversation | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as StoredConversation) : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeConversation(conversation: StoredConversation | null): void {
+  try {
+    if (conversation) localStorage.setItem(STORAGE_KEY, JSON.stringify(conversation));
+    else localStorage.removeItem(STORAGE_KEY);
+  } catch {}
+}
+
 export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) {
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'glyph', text: 'Hello. I am Glyph. What would you like to know?' },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([GREETING]);
   const [input, setInput]     = useState('');
   const [streaming, setStreaming] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Restore the previous conversation once on mount (localStorage is client-only)
+  useEffect(() => {
+    const saved = loadConversation();
+    if (saved?.messages?.length) {
+      setMessages(saved.messages);
+      setConversationId(saved.conversationId);
+    }
+  }, []);
+
+  // Persist after each completed exchange (not on every streamed token)
+  useEffect(() => {
+    if (!streaming && messages.length > 1) storeConversation({ conversationId, messages });
+  }, [streaming, messages, conversationId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const handleNewConversation = () => {
+    if (streaming) return;
+    storeConversation(null);
+    setConversationId(null);
+    setMessages([GREETING]);
+  };
 
   const handleSend = async () => {
     const text = input.trim();
     if (!text || streaming) return;
 
     setInput('');
-
-    // Build history from current messages (exclude the initial greeting)
-    const history: HistoryItem[] = messages
-      .filter((m) => m.text !== 'Hello. I am Glyph. What would you like to know?')
-      .map((m) => ({
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.text,
-      }));
 
     // Append user message
     setMessages((prev) => [...prev, { role: 'user', text }]);
@@ -53,14 +92,20 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
     setStreaming(true);
 
     try {
-      await sendMessage(text, adapterId, history, (token) => {
-        setMessages((prev) => {
-          const updated = [...prev];
-          const last = updated[updated.length - 1];
-          updated[updated.length - 1] = { ...last, text: last.text + token };
-          return updated;
-        });
-      });
+      await sendMessage(
+        text,
+        adapterId,
+        conversationId,
+        (token) => {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            updated[updated.length - 1] = { ...last, text: last.text + token };
+            return updated;
+          });
+        },
+        setConversationId,
+      );
     } catch (err) {
       setMessages((prev) => {
         const updated = [...prev];
@@ -145,6 +190,25 @@ export default function ChatModal({ open, onClose, adapterId }: ChatModalProps) 
         }}
       >
         <CloseIcon fontSize="small" />
+      </IconButton>
+
+      {/* New conversation */}
+      <IconButton
+        onClick={handleNewConversation}
+        disabled={streaming || messages.length <= 1}
+        size="small"
+        aria-label="new conversation"
+        title="New conversation"
+        sx={{
+          position: 'absolute',
+          top: 8,
+          right: 40,
+          zIndex: 10,
+          color: 'rgba(255,255,255,0.5)',
+          '&:hover': { color: 'rgba(255,255,255,0.9)' },
+        }}
+      >
+        <RestartAltIcon fontSize="small" />
       </IconButton>
 
       {/* Message list */}

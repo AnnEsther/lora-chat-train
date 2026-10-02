@@ -233,3 +233,36 @@ class KnowledgeCorpus(Base):
     facts = Column(JSON, nullable=False, default=list)
     source_session_id = Column(UUID(as_uuid=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+
+class GlyphConversation(Base):
+    """A Glyph Chat conversation. Every message is saved for review."""
+
+    __tablename__ = "glyph_conversations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    messages = relationship(
+        "GlyphMessage", back_populates="conversation", order_by="GlyphMessage.created_at"
+    )
+
+
+class GlyphMessage(Base):
+    __tablename__ = "glyph_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    conversation_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("glyph_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role = Column(String, nullable=False)  # user | assistant
+    content = Column(Text, nullable=False)
+    adapter_id = Column(String, nullable=True)
+    adapter_run_id = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_now)
+
+    conversation = relationship("GlyphConversation", back_populates="messages")

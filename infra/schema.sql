@@ -156,3 +156,22 @@ CREATE TABLE IF NOT EXISTS knowledge_corpus (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_corpus_topic ON knowledge_corpus(topic);
+
+-- ── Glyph Chat conversations (player-facing chat, every message saved) ───────
+CREATE TABLE IF NOT EXISTS glyph_conversations (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS glyph_messages (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id  UUID NOT NULL REFERENCES glyph_conversations(id) ON DELETE CASCADE,
+    role             TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content          TEXT NOT NULL,
+    adapter_id       TEXT,          -- adapter selected in Glyph Chat (current, base, history id)
+    adapter_run_id   TEXT,          -- training run that produced the adapter, if known
+    error            TEXT,          -- set when the reply failed or was cut short
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_glyph_messages_conversation ON glyph_messages(conversation_id, created_at);

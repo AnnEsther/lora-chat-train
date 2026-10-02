@@ -5,9 +5,12 @@
 # df -h /var/lib/containerd
 # df -h /var/lib/docker   # if using Docker daemon instead of containerd
 # df -h /                 # overall root partition
-# Step 2 — Free up Docker/containerd cache:
-# Remove unused images, containers, volumes, build cache
-# docker system prune -af --volumes
+# Step 2 — Free up Docker/containerd cache (images, stopped containers, build cache):
+# make prune
+# NEVER add --volumes (e.g. `docker system prune --volumes`) or run
+# `docker compose down -v`: that deletes the postgres_data volume — every
+# session, Q&A pair, training run and saved Glyph Chat conversation — plus the
+# deployed adapters. Back up first if in doubt: ./scripts/backup_db.sh
 # Check how much build cache specifically is taking up
 # docker system df
 # Step 3 — If still not enough, remove old images manually:

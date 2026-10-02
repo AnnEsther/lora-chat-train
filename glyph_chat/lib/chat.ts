@@ -1,4 +1,4 @@
-import type { Adapter, HistoryItem } from './types';
+import type { Adapter } from './types';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 const API_KEY  = process.env.NEXT_PUBLIC_API_KEY  ?? '';
@@ -16,13 +16,16 @@ export async function fetchAdapters(): Promise<Adapter[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Send a message and stream the response token-by-token
+// Send a message and stream the response token-by-token.
+// The server saves every message and keeps the conversation history itself:
+// pass the id it returns (via onConversation) with every following message.
 // ---------------------------------------------------------------------------
 export async function sendMessage(
   text: string,
   adapterId: string,
-  history: HistoryItem[],
+  conversationId: string | null,
   onChunk: (token: string) => void,
+  onConversation: (id: string) => void,
 ): Promise<void> {
   const resp = await fetch(`${BASE_URL}/chat/direct`, {
     method: 'POST',
@@ -33,7 +36,7 @@ export async function sendMessage(
     body: JSON.stringify({
       message: text,
       adapter_id: adapterId,
-      history,
+      conversation_id: conversationId,
     }),
   });
 
@@ -42,18 +45,23 @@ export async function sendMessage(
 
   const reader  = resp.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = '';
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
 
-    const raw = decoder.decode(value, { stream: true });
-    for (const line of raw.split('\n')) {
+    // Network chunks can split an event mid-line; keep the partial tail for the next read
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
       if (!line.startsWith('data: ')) continue;
       const payload = line.slice(6).trim();
       if (!payload) continue;
 
       const event = JSON.parse(payload);
+      if (event.type === 'conversation') onConversation(event.id);
       if (event.type === 'chunk') onChunk(event.text);
       if (event.type === 'end')   return;
       if (event.type === 'error') throw new Error(event.message);
