@@ -489,9 +489,12 @@ header "Database initialisation"
 
 # Always re-apply: schema.sql is idempotent (IF NOT EXISTS everywhere), so this
 # creates missing tables on a fresh DB and adds new columns to an existing one.
+# Pipe the repo's copy in: the container's single-file bind mount
+# (/docker-entrypoint-initdb.d/01_schema.sql) keeps pointing at the OLD file
+# after `git pull` replaces it, until the container is recreated.
 info "Applying schema (safe to re-run)..."
 if docker compose exec -T postgres psql -U lora -d lora -q -v ON_ERROR_STOP=1 \
-    -f /docker-entrypoint-initdb.d/01_schema.sql; then
+    < "$REPO_DIR/infra/schema.sql"; then
   ok "Schema applied"
 else
   warn "Schema apply failed — check: docker compose logs postgres"

@@ -390,9 +390,12 @@ docker compose exec postgres psql -U lora -d lora -c "\dt"
 If tables are missing (e.g. the volume already existed from a previous run):
 
 ```bash
-docker compose exec postgres psql -U lora -d lora \
-  -f /docker-entrypoint-initdb.d/01_schema.sql
+docker compose exec -T postgres psql -U lora -d lora -v ON_ERROR_STOP=1 < infra/schema.sql
 ```
+
+Use the repo's file (piped in), not `-f /docker-entrypoint-initdb.d/01_schema.sql`: that
+single-file bind mount keeps pointing at the old file after `git pull` until the postgres
+container is recreated, so new tables would silently not be created.
 
 ---
 
